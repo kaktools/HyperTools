@@ -2023,6 +2023,7 @@ internal sealed class GuestMainWindow : Window
         _sharedFolderMappingsListView.ItemTemplate = CreateSharedFolderMappingTemplate();
         _sharedFolderMappingsListView.SelectionMode = ListViewSelectionMode.None;
         _sharedFolderMappingsListView.IsItemClickEnabled = false;
+        _sharedFolderMappingsListView.HorizontalContentAlignment = HorizontalAlignment.Stretch;
 
         _sharedFolderDisabledOverlayText.Foreground = Application.Current.Resources["TextMutedBrush"] as Brush;
         var listBody = new Grid();
@@ -2072,20 +2073,20 @@ internal sealed class GuestMainWindow : Window
     {
         const string templateXaml = """
 <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'>
-    <Grid ColumnSpacing='8' Margin='4,2,4,2'>
+    <Grid ColumnSpacing='8' Margin='4,2,4,2' HorizontalAlignment='Stretch'>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width='36'/>
             <ColumnDefinition Width='32'/>
             <ColumnDefinition Width='*'/>
-            <ColumnDefinition Width='90'/>
+            <ColumnDefinition Width='Auto' MinWidth='106'/>
         </Grid.ColumnDefinitions>
         <CheckBox IsChecked='{Binding Enabled, Mode=TwoWay}' VerticalAlignment='Center' HorizontalAlignment='Left'/>
         <TextBlock Grid.Column='1' Text='{Binding MountStateDot}' VerticalAlignment='Center' HorizontalAlignment='Center' FontSize='12'/>
-        <StackPanel Grid.Column='2' Spacing='1' VerticalAlignment='Center'>
+        <StackPanel Grid.Column='2' Spacing='1' VerticalAlignment='Center' HorizontalAlignment='Stretch'>
             <TextBlock Text='{Binding Label}' FontWeight='SemiBold' Opacity='0.95' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap'/>
             <TextBlock Text='{Binding SharePath}' Opacity='0.72' FontSize='11' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap'/>
         </StackPanel>
-        <TextBlock Grid.Column='3' Text='{Binding MountStateText}' Opacity='0.82' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap'/>
+        <TextBlock Grid.Column='3' Text='{Binding MountStateText}' Opacity='0.82' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' HorizontalAlignment='Right' TextAlignment='Right' Margin='8,0,0,0'/>
     </Grid>
 </DataTemplate>
 """;
