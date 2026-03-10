@@ -22,6 +22,10 @@ internal sealed class GuestWinFspMountService : IDisposable
     public async Task EnsureCatalogMountedAsync(string driveLetter, IReadOnlyList<GuestSharedFolderMapping> mappings, CancellationToken cancellationToken)
     {
         var normalizedDrive = GuestConfigService.NormalizeDriveLetter(driveLetter);
+        var hasExistingCatalog = _mountedByDrive.TryGetValue(normalizedDrive, out var existingCatalogMount)
+                                 && existingCatalogMount is not null
+                                 && existingCatalogMount.IsCatalog;
+
         var enabledMappings = (mappings ?? [])
             .Where(mapping => mapping is not null
                               && mapping.Enabled
@@ -39,8 +43,6 @@ internal sealed class GuestWinFspMountService : IDisposable
                 continue;
             }
 
-            await GuestFileServiceModeHelper.EnsureShareAvailableAsync(mapping.SharePath, cancellationToken);
-
             var preferredRootName = (mapping.Label ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(preferredRootName))
             {
@@ -51,10 +53,71 @@ internal sealed class GuestWinFspMountService : IDisposable
             catalogEntries.Add(new CatalogShareEntry(rootName, shareId));
         }
 
-        if (_mountedByDrive.TryGetValue(normalizedDrive, out var existing) && existing.IsCatalog)
+        if (hasExistingCatalog && existingCatalogMount is not null)
         {
-            existing.UpdateCatalog(catalogEntries, "HyperTool");
+            var existingShareIds = existingCatalogMount.GetCatalogShareIdsSnapshot();
+            var introducedShareIds = catalogEntries
+                .Select(entry => entry.ShareId)
+                .Where(shareId => !existingShareIds.Contains(shareId))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (introducedShareIds.Count > 0)
+            {
+                var availableShares = await GuestFileServiceModeHelper.FetchSharesAsync(cancellationToken);
+                var availableShareIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var share in availableShares)
+                {
+                    if (!string.IsNullOrWhiteSpace(share.Id))
+                    {
+                        availableShareIds.Add(share.Id.Trim());
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(share.ShareName))
+                    {
+                        availableShareIds.Add(share.ShareName.Trim());
+                    }
+                }
+
+                var missingShareId = introducedShareIds.FirstOrDefault(shareId => !availableShareIds.Contains(shareId));
+                if (!string.IsNullOrWhiteSpace(missingShareId))
+                {
+                    throw new InvalidOperationException($"Freigabe '{missingShareId}' wurde im HyperTool File-Dienst nicht gefunden.");
+                }
+            }
+
+            existingCatalogMount.UpdateCatalog(catalogEntries, "HyperTool");
             return;
+        }
+
+        if (catalogEntries.Count > 0)
+        {
+            var availableShares = await GuestFileServiceModeHelper.FetchSharesAsync(cancellationToken);
+            var availableShareIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var share in availableShares)
+            {
+                if (!string.IsNullOrWhiteSpace(share.Id))
+                {
+                    availableShareIds.Add(share.Id.Trim());
+                }
+
+                if (!string.IsNullOrWhiteSpace(share.ShareName))
+                {
+                    availableShareIds.Add(share.ShareName.Trim());
+                }
+            }
+
+            var missingShareId = catalogEntries
+                .Select(entry => entry.ShareId)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(shareId => !availableShareIds.Contains(shareId));
+
+            if (!string.IsNullOrWhiteSpace(missingShareId))
+            {
+                throw new InvalidOperationException($"Freigabe '{missingShareId}' wurde im HyperTool File-Dienst nicht gefunden.");
+            }
         }
 
         await UnmountAsync(normalizedDrive, cancellationToken);
@@ -280,11 +343,16 @@ internal sealed class GuestWinFspMountService : IDisposable
             throw new InvalidOperationException($"WinFsp Mount fehlgeschlagen für {mountPoint} (NTSTATUS={mountStatus}).");
         }
 
-        return new MountedFileSystem(driveLetter, "__catalog__", volumeLabel, host, fileSystem, isCatalog: true);
+        var mounted = new MountedFileSystem(driveLetter, "__catalog__", volumeLabel, host, fileSystem, isCatalog: true);
+        mounted.UpdateCatalog(catalogEntries, volumeLabel);
+        return mounted;
     }
 
     private sealed class MountedFileSystem : IDisposable
     {
+        private readonly object _catalogSync = new();
+        private HashSet<string> _catalogShareIds = new(StringComparer.OrdinalIgnoreCase);
+
         public MountedFileSystem(string driveLetter, string shareId, string volumeLabel, FileSystemHost host, HyperToolRpcFileSystem fileSystem, bool isCatalog)
         {
             DriveLetter = driveLetter;
@@ -293,6 +361,11 @@ internal sealed class GuestWinFspMountService : IDisposable
             Host = host;
             FileSystem = fileSystem;
             IsCatalog = isCatalog;
+
+            if (isCatalog)
+            {
+                _catalogShareIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
         }
 
         public string DriveLetter { get; }
@@ -307,6 +380,14 @@ internal sealed class GuestWinFspMountService : IDisposable
 
         public bool IsCatalog { get; }
 
+        public IReadOnlySet<string> GetCatalogShareIdsSnapshot()
+        {
+            lock (_catalogSync)
+            {
+                return new HashSet<string>(_catalogShareIds, StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
         public void UpdateCatalog(IReadOnlyList<CatalogShareEntry> catalogEntries, string volumeLabel)
         {
             if (!IsCatalog)
@@ -320,6 +401,15 @@ internal sealed class GuestWinFspMountService : IDisposable
                 .ToDictionary(group => group.Key, group => group.First().ShareId, StringComparer.OrdinalIgnoreCase);
 
             FileSystem.UpdateCatalog(catalogByRoot, volumeLabel);
+
+            lock (_catalogSync)
+            {
+                _catalogShareIds = catalogByRoot
+                    .Values
+                    .Where(static shareId => !string.IsNullOrWhiteSpace(shareId))
+                    .Select(static shareId => shareId.Trim())
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
         }
 
         public void Dispose()

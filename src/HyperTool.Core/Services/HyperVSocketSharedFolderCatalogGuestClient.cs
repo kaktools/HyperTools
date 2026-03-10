@@ -1,4 +1,5 @@
 using HyperTool.Models;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -26,7 +27,8 @@ public sealed class HyperVSocketSharedFolderCatalogGuestClient
 
         using var socket = new Socket((AddressFamily)34, SocketType.Stream, (ProtocolType)1);
         linkedCts.Token.ThrowIfCancellationRequested();
-        socket.Connect(new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, _serviceId));
+        var endpoint = new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, _serviceId);
+        ConnectWithRetry(socket, endpoint, linkedCts.Token);
 
         await using var stream = new NetworkStream(socket, ownsSocket: true);
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: false);
@@ -53,5 +55,41 @@ public sealed class HyperVSocketSharedFolderCatalogGuestClient
                 ReadOnly = item.ReadOnly
             })
             .ToList();
+    }
+
+    private static void ConnectWithRetry(Socket socket, EndPoint endpoint, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 3;
+        var delays = new[]
+        {
+            TimeSpan.FromMilliseconds(70),
+            TimeSpan.FromMilliseconds(210)
+        };
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                socket.Connect(endpoint);
+                return;
+            }
+            catch (SocketException ex) when (attempt < maxAttempts && IsTransientConnectSocketError(ex))
+            {
+                Task.Delay(delays[Math.Min(attempt - 1, delays.Length - 1)], cancellationToken).GetAwaiter().GetResult();
+            }
+        }
+    }
+
+    private static bool IsTransientConnectSocketError(SocketException ex)
+    {
+        return ex.SocketErrorCode is SocketError.NoBufferSpaceAvailable
+            or SocketError.TryAgain
+            or SocketError.TimedOut
+            or SocketError.ConnectionRefused
+            or SocketError.NetworkDown
+            or SocketError.NetworkUnreachable
+            or SocketError.HostDown
+            or SocketError.HostUnreachable;
     }
 }

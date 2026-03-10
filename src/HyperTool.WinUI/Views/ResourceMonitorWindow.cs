@@ -32,7 +32,7 @@ public sealed class ResourceMonitorWindow : Window
 
         Title = "HyperTool Resource Monitor";
         DwmWindowHelper.ApplyRoundedCorners(this);
-        AppWindow.Resize(new SizeInt32(1125, 910));
+        AppWindow.Resize(new SizeInt32(1128, 910));
         TryApplyWindowIcon();
 
         Content = BuildLayout();
