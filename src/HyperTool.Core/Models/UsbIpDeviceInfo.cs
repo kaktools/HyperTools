@@ -81,7 +81,7 @@ public sealed class UsbIpDeviceInfo
             var commentInfo = string.IsNullOrWhiteSpace(CustomComment)
                 ? string.Empty
                 : $"  ({CustomComment})";
-            return $"{bus}  {hardware}  {description}  [{StateText}]{commentInfo}{guestInfo}";
+            return $"[{StateText}]  {bus}  {hardware}  {description}{commentInfo}{guestInfo}";
         }
     }
 
@@ -94,7 +94,7 @@ public sealed class UsbIpDeviceInfo
             var description = string.IsNullOrWhiteSpace(CustomName)
                 ? (string.IsNullOrWhiteSpace(Description) ? "USB Device" : Description)
                 : CustomName;
-            return $"{bus}  {hardware}  {description}  [{StateText}]";
+            return $"[{StateText}]  {bus}  {hardware}  {description}";
         }
     }
 

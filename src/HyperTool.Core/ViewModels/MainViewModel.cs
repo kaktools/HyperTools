@@ -22,9 +22,9 @@ public partial class MainViewModel : ViewModelBase
     private const int VkNumLock = 0x90;
     private const uint KeyeventfExtendedKey = 0x0001;
     private const uint KeyeventfKeyUp = 0x0002;
-    private static readonly TimeSpan StaleUsbAttachGracePeriod = TimeSpan.FromSeconds(25);
+    private static readonly TimeSpan StaleUsbAttachGracePeriod = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
-    private const int DefaultStaleUsbDetachRetryThreshold = 3;
+    private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private static readonly TimeSpan MonitorAgentTimeout = TimeSpan.FromSeconds(5);
 
     [ObservableProperty]
@@ -1905,6 +1905,8 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task<int> TryDetachStaleAttachedDevicesWithoutGuestAckAsync(IReadOnlyList<UsbIpDeviceInfo> devices, CancellationToken token)
     {
+        var effectiveRetryAttempts = Math.Max(_usbAutoDetachRetryAttempts, 12);
+
         if (devices.Count == 0)
         {
             _usbAttachedWithoutAckSinceUtc.Clear();
@@ -1974,13 +1976,13 @@ public partial class MainViewModel : ViewModelBase
             attemptCount++;
             _usbAttachedWithoutAckAttempts[busId] = attemptCount;
 
-            if (attemptCount < _usbAutoDetachRetryAttempts)
+            if (attemptCount < effectiveRetryAttempts)
             {
                 Log.Debug(
                     "Stale attached USB still missing guest ack. BusId={BusId}, Attempt={Attempt}/{MaxAttempts}",
                     busId,
                     attemptCount,
-                    _usbAutoDetachRetryAttempts);
+                    effectiveRetryAttempts);
                 continue;
             }
 

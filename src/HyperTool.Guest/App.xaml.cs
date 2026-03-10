@@ -24,8 +24,9 @@ public sealed partial class App : Application
 {
     private const int GuestUsbAutoRefreshSeconds = 4;
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
-    private const int GuestUsbHeartbeatIntervalSeconds = 12;
+    private const int GuestUsbHeartbeatIntervalSeconds = 45;
     private const int SharedFolderCatalogFetchMaxAttempts = 3;
+    private static readonly TimeSpan SharedFolderCatalogReadyLogHeartbeatInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan RecurringWarnRateLimitInterval = TimeSpan.FromMinutes(2);
     private const string GuestWindowTitle = "HyperTool Guest";
     private const string GuestHeadline = "HyperTool Guest";
@@ -126,6 +127,8 @@ public sealed partial class App : Application
     private readonly ConcurrentDictionary<string, RateLimitedWarnState> _rateLimitedWarnStates = new(StringComparer.Ordinal);
     private DateTimeOffset? _sharedFolderReconnectLastRunUtc;
     private string _sharedFolderReconnectLastSummary = "Noch kein Lauf";
+    private DateTimeOffset? _sharedFolderCatalogReadyLastLoggedUtc;
+    private string _sharedFolderCatalogReadyLastStateKey = string.Empty;
 
     private sealed class RateLimitedWarnState
     {
@@ -2068,18 +2071,26 @@ public sealed partial class App : Application
                 {
                     list = await _usbService.GetRemoteDevicesAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
                 }
-                catch when (string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase))
+                catch (Exception hyperVEx) when (string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase))
                 {
-                    var ipFallbackResolution = ResolveUsbHostAddressDiagnostics(preferHyperVSocket: false);
-                    if (string.IsNullOrWhiteSpace(ipFallbackResolution.ResolvedIpv4))
+                    if (IsTransientHyperVTransportFailure(hyperVEx))
                     {
-                        throw;
+                        await Task.Delay(220);
+                        list = await _usbService.GetRemoteDevicesAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
                     }
+                    else
+                    {
+                        var ipFallbackResolution = ResolveUsbHostAddressDiagnostics(preferHyperVSocket: false);
+                        if (string.IsNullOrWhiteSpace(ipFallbackResolution.ResolvedIpv4))
+                        {
+                            throw;
+                        }
 
-                    fallbackToIpUsed = true;
-                    fallbackToIpUsedForLog = true;
-                    fallbackHostAddress = ipFallbackResolution.ResolvedIpv4;
-                    list = await _usbService.GetRemoteDevicesAsync(ipFallbackResolution.ResolvedIpv4, CancellationToken.None);
+                        fallbackToIpUsed = true;
+                        fallbackToIpUsedForLog = true;
+                        fallbackHostAddress = ipFallbackResolution.ResolvedIpv4;
+                        list = await _usbService.GetRemoteDevicesAsync(ipFallbackResolution.ResolvedIpv4, CancellationToken.None);
+                    }
                 }
             }
             else
@@ -2336,6 +2347,41 @@ public sealed partial class App : Application
                 return 1;
             }
 
+            if (IsUsbAlreadyExportedError(ex))
+            {
+                await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
+
+                try
+                {
+                    await RefreshUsbDevicesAsync(emitLogs: false);
+                }
+                catch
+                {
+                }
+
+                var currentDevice = FindUsbByBusId(busId);
+                if (currentDevice?.IsAttached == true)
+                {
+                    _selectedUsbBusId = busId;
+                    ApplyUsbTransportResolution(hostResolution);
+
+                    GuestLogger.Info("usb.connect.success", "USB Host-Attach bereits aktiv (already exported).", new
+                    {
+                        operationId,
+                        busId,
+                        elapsedMs = stopwatch.ElapsedMilliseconds,
+                        hostAddress = hostResolution.ResolvedIpv4,
+                        hostSource = hostResolution.Source,
+                        transportPath = string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase)
+                            ? "hyperv"
+                            : "ip-fallback",
+                        recovery = "already-exported-as-attached"
+                    });
+
+                    return 0;
+                }
+            }
+
             if (ShouldRetryUsbAttach(ex))
             {
                 try
@@ -2468,10 +2514,15 @@ public sealed partial class App : Application
         return message.Contains("device in error state", StringComparison.OrdinalIgnoreCase)
                || message.Contains("error state", StringComparison.OrdinalIgnoreCase)
                || message.Contains("resource busy", StringComparison.OrdinalIgnoreCase)
-               || message.Contains("already exported", StringComparison.OrdinalIgnoreCase)
-               || message.Contains("device busy", StringComparison.OrdinalIgnoreCase)
                || message.Contains("temporarily unavailable", StringComparison.OrdinalIgnoreCase)
                || message.Contains("already in use", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUsbAlreadyExportedError(Exception exception)
+    {
+        var message = exception.Message ?? string.Empty;
+        return message.Contains("already exported", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("device busy", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool ShouldMarkUsbClientUnavailableFromException(Exception exception)
@@ -2495,6 +2546,16 @@ public sealed partial class App : Application
                || message.Contains("driver is not installed", StringComparison.OrdinalIgnoreCase)
                || message.Contains("treiber ist nicht installiert", StringComparison.OrdinalIgnoreCase)
                || message.Contains("stelle sicher, dass usbip-win2 installiert ist", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTransientHyperVTransportFailure(Exception exception)
+    {
+        var message = exception.Message ?? string.Empty;
+        return message.Contains("Pufferspeicher", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("Warteschlange voll", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("No buffer space", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("queue full", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("temporarily unavailable", StringComparison.OrdinalIgnoreCase);
     }
 
     private void MarkUsbClientUnavailableAndRefreshUi(string eventName, string? busId, string reason)
@@ -3376,12 +3437,24 @@ public sealed partial class App : Application
                 await _winFspMountService.EnsureCatalogMountedAsync(baseDriveLetter, mappings, cancellationToken);
                 newlyMounted = mappings.Count;
                 ResetRateLimitedWarning("sharedfolders.reconnect.failed", baseDriveLetter);
-                GuestLogger.Info("sharedfolders.reconnect.catalog_ready", "HyperTool-File-Katalog bereit.", new
+                var now = DateTimeOffset.UtcNow;
+                var stateKey = $"{baseDriveLetter}:{mappings.Count}";
+                var shouldLogCatalogReady = !string.Equals(_sharedFolderCatalogReadyLastStateKey, stateKey, StringComparison.Ordinal)
+                                           || !_sharedFolderCatalogReadyLastLoggedUtc.HasValue
+                                           || (now - _sharedFolderCatalogReadyLastLoggedUtc.Value) >= SharedFolderCatalogReadyLogHeartbeatInterval;
+
+                if (shouldLogCatalogReady)
                 {
-                    driveLetter = baseDriveLetter,
-                    count = mappings.Count,
-                    mode = "hypertool-file-catalog"
-                });
+                    GuestLogger.Info("sharedfolders.reconnect.catalog_ready", "HyperTool-File-Katalog bereit.", new
+                    {
+                        driveLetter = baseDriveLetter,
+                        count = mappings.Count,
+                        mode = "hypertool-file-catalog"
+                    });
+
+                    _sharedFolderCatalogReadyLastStateKey = stateKey;
+                    _sharedFolderCatalogReadyLastLoggedUtc = now;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -3389,6 +3462,8 @@ public sealed partial class App : Application
             }
             catch (Exception ex)
             {
+                _sharedFolderCatalogReadyLastStateKey = string.Empty;
+                _sharedFolderCatalogReadyLastLoggedUtc = null;
                 WarnRateLimited(
                     "sharedfolders.reconnect.failed",
                     ex.Message,
@@ -3949,54 +4024,93 @@ public sealed partial class App : Application
             return;
         }
 
-        try
+        Exception? lastError = null;
+        for (var attempt = 1; attempt <= 2; attempt++)
         {
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            linkedCts.CancelAfter(TimeSpan.FromMilliseconds(1200));
-
-            using var socket = new System.Net.Sockets.Socket((System.Net.Sockets.AddressFamily)34, System.Net.Sockets.SocketType.Stream, (System.Net.Sockets.ProtocolType)1);
-            linkedCts.Token.ThrowIfCancellationRequested();
-            socket.Connect(new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, HyperVSocketUsbTunnelDefaults.DiagnosticsServiceId));
-
-            await using var stream = new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
-            await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 256, leaveOpen: false)
+            try
             {
-                NewLine = "\n"
-            };
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                linkedCts.CancelAfter(TimeSpan.FromMilliseconds(1200));
 
-            var guestNetworks = ResolveGuestIpv4Settings();
-            var guestNetwork = guestNetworks.Count > 0
-                ? guestNetworks[0]
-                : (string.Empty, string.Empty, string.Empty, string.Empty);
-            var (guestCpuPercent, guestRamUsedGb, guestRamTotalGb) = _diagnosticsResourceSampler.Sample();
+                using var socket = new System.Net.Sockets.Socket((System.Net.Sockets.AddressFamily)34, System.Net.Sockets.SocketType.Stream, (System.Net.Sockets.ProtocolType)1);
+                linkedCts.Token.ThrowIfCancellationRequested();
+                socket.Connect(new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, HyperVSocketUsbTunnelDefaults.DiagnosticsServiceId));
 
-            var payload = JsonSerializer.Serialize(new HyperVSocketDiagnosticsAck
-            {
-                GuestComputerName = Environment.MachineName,
-                BusId = busId.Trim(),
-                EventType = eventType.Trim(),
-                SentAtUtc = DateTime.UtcNow.ToString("O"),
-                GuestIpv4Address = guestNetwork.Item1,
-                GuestIpv4SubnetMask = guestNetwork.Item2,
-                GuestIpv4Gateway = guestNetwork.Item3,
-                GuestNetworkAdapterName = guestNetwork.Item4,
-                GuestCpuPercent = Math.Round(guestCpuPercent, 1),
-                GuestRamUsedGb = Math.Round(guestRamUsedGb, 2),
-                GuestRamTotalGb = Math.Round(guestRamTotalGb, 2),
-                GuestIpv4Entries = guestNetworks.Select(entry => new HyperVSocketGuestIpv4Entry
+                await using var stream = new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+                await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 256, leaveOpen: false)
                 {
-                    Ipv4Address = entry.ipv4Address,
-                    SubnetMask = entry.subnetMask,
-                    Gateway = entry.gateway,
-                    AdapterName = entry.adapterName
-                }).ToList()
-            });
+                    NewLine = "\n"
+                };
 
-            await writer.WriteLineAsync(payload.AsMemory(), linkedCts.Token);
-            await writer.FlushAsync(linkedCts.Token);
+                var guestNetworks = ResolveGuestIpv4Settings();
+                var guestNetwork = guestNetworks.Count > 0
+                    ? guestNetworks[0]
+                    : (string.Empty, string.Empty, string.Empty, string.Empty);
+                var (guestCpuPercent, guestRamUsedGb, guestRamTotalGb) = _diagnosticsResourceSampler.Sample();
+
+                var payload = JsonSerializer.Serialize(new HyperVSocketDiagnosticsAck
+                {
+                    GuestComputerName = Environment.MachineName,
+                    BusId = busId.Trim(),
+                    EventType = eventType.Trim(),
+                    SentAtUtc = DateTime.UtcNow.ToString("O"),
+                    GuestIpv4Address = guestNetwork.Item1,
+                    GuestIpv4SubnetMask = guestNetwork.Item2,
+                    GuestIpv4Gateway = guestNetwork.Item3,
+                    GuestNetworkAdapterName = guestNetwork.Item4,
+                    GuestCpuPercent = Math.Round(guestCpuPercent, 1),
+                    GuestRamUsedGb = Math.Round(guestRamUsedGb, 2),
+                    GuestRamTotalGb = Math.Round(guestRamTotalGb, 2),
+                    GuestIpv4Entries = guestNetworks.Select(entry => new HyperVSocketGuestIpv4Entry
+                    {
+                        Ipv4Address = entry.ipv4Address,
+                        SubnetMask = entry.subnetMask,
+                        Gateway = entry.gateway,
+                        AdapterName = entry.adapterName
+                    }).ToList()
+                });
+
+                await writer.WriteLineAsync(payload.AsMemory(), linkedCts.Token);
+                await writer.FlushAsync(linkedCts.Token);
+                ResetRateLimitedWarning("usb.ack.send.failed", $"{eventType.Trim().ToLowerInvariant()}:{busId.Trim().ToLowerInvariant()}");
+                return;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                if (attempt < 2)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(140), cancellationToken);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
         }
-        catch
+
+        if (lastError is not null)
         {
+            if (string.Equals(eventType.Trim(), "usb-heartbeat", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var scopeKey = $"{eventType.Trim().ToLowerInvariant()}:{busId.Trim().ToLowerInvariant()}";
+            WarnRateLimited(
+                "usb.ack.send.failed",
+                lastError.Message,
+                new
+                {
+                    busId = busId.Trim(),
+                    eventType = eventType.Trim(),
+                    attempts = 2,
+                    exceptionType = lastError.GetType().FullName
+                },
+                scopeKey,
+                TimeSpan.FromMinutes(10));
         }
     }
 
