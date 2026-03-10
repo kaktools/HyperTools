@@ -1,0 +1,49 @@
+{
+  "defaultVmName": "",
+  "lastSelectedVmName": "",
+  "vms": [],
+  "defaultSwitchName": "Default Switch",
+  "defaultVmImportDestinationPath": "",
+  "vmConnectComputerName": "localhost",
+  "hns": {
+    "enabled": false,
+    "autoRestartAfterDefaultSwitch": false,
+    "autoRestartAfterAnyConnect": false
+  },
+  "ui": {
+    "windowTitle": "HyperTool",
+    "theme": "Dark",
+    "startMinimized": false,
+    "minimizeToTray": true,
+    "enableTrayIcon": true,
+    "enableTrayMenu": true,
+    "startWithWindows": false,
+    "openConsoleAfterVmStart": true,
+    "restoreNumLockAfterVmStart": false,
+    "numLockWatcherIntervalSeconds": 30,
+    "openVmConnectWithSessionEdit": false,
+    "trayVmNames": []
+  },
+  "update": {
+    "checkOnStartup": true,
+    "gitHubOwner": "KaKTools",
+    "gitHubRepo": "HyperTool"
+  },
+  "usb": {
+    "enabled": true,
+    "autoDetachOnClientDisconnect": true,
+    "autoDetachRetryAttempts": 3,
+    "unshareOnExit": true,
+    "autoShareDeviceKeys": []
+  },
+  "sharedFolders": {
+    "enabled": true,
+    "hostDefinitions": []
+  },
+  "monitoring": {
+    "enabled": true,
+    "intervalMs": 1000,
+    "graphHistoryMinutes": 5,
+    "graphHistorySize": 300
+  }
+}
