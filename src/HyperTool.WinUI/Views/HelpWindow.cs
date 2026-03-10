@@ -1,0 +1,347 @@
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Windowing;
+using HyperTool.WinUI.Helpers;
+using System.Diagnostics;
+using System.IO;
+using Windows.Graphics;
+using Windows.UI;
+
+namespace HyperTool.WinUI.Views;
+
+public sealed class HelpWindow : Window
+{
+    private readonly string _configPath;
+    private readonly string _repoUrl;
+    private readonly bool _isDarkMode;
+    private TextBlock? _rainbowHintText;
+
+    public HelpWindow(string configPath, string repoUrl, string uiTheme)
+    {
+        _configPath = configPath;
+        _repoUrl = repoUrl;
+        _isDarkMode = string.Equals(uiTheme, "Dark", StringComparison.OrdinalIgnoreCase);
+
+        Title = "HyperTool Hilfe";
+        DwmWindowHelper.ApplyRoundedCorners(this);
+        AppWindow.Resize(new SizeInt32(860, 720));
+        TryApplyWindowIcon();
+
+        Content = BuildLayout();
+        ApplyRequestedTheme();
+        UpdateTitleBarAppearance();
+    }
+
+    private UIElement BuildLayout()
+    {
+        var host = new Grid
+        {
+            Background = Application.Current.Resources["PageBackgroundBrush"] as Brush
+        };
+
+        var root = new Grid
+        {
+            Margin = new Thickness(18),
+            Background = Application.Current.Resources["PageBackgroundBrush"] as Brush
+        };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10) });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10) });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var headerCard = CreateCard(16);
+        var headerRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
+        headerRow.Children.Add(new Image
+        {
+            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri("ms-appx:///Assets/HyperTool.ico")),
+            Width = 24,
+            Height = 24
+        });
+        var titleStack = new StackPanel { Spacing = 2 };
+        titleStack.Children.Add(new TextBlock { Text = "HyperTool Hilfe", FontSize = 24, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        titleStack.Children.Add(new TextBlock { Text = "Kurzübersicht über Funktionen und Einstellungen", Opacity = 0.8 });
+        headerRow.Children.Add(titleStack);
+        headerCard.Child = headerRow;
+        root.Children.Add(headerCard);
+
+        var bodyCard = CreateCard(12);
+        var bodyStack = new StackPanel { Spacing = 12 };
+        bodyStack.Children.Add(CreateSection("VM Auswahl", "Im Header siehst du alle Hyper-V VMs. Ein Klick auf einen Chip setzt die aktive Arbeits-VM."));
+        bodyStack.Children.Add(CreateSection("VM Aktionen", "Start, Stop, Hard Off, Restart und Konsole stehen als Schnellaktionen bereit (inkl. Tray-Aktionen)."));
+        bodyStack.Children.Add(CreateSection("Netzwerk", "Switches werden pro VM-Adapter verwaltet. Über Host-Netzwerk öffnest du die Adapter-Detailansicht mit Status-Chips (Gateway/Default Switch)."));
+        bodyStack.Children.Add(CreateSection("USB Host", "USB Share zeigt oben rechts einen Aktiv/Inaktiv-Status-Chip. Bei deaktiviertem Feature erscheint im Tabellenbereich ein zentrierter Hinweis 'Deaktiviert'; nach Reaktivierung wird nach ca. 1 Sekunde automatisch aktualisiert."));
+        bodyStack.Children.Add(CreateSection("Shared Folder Host", "Shared Folder nutzt ebenfalls einen Aktiv/Inaktiv-Status-Chip oben rechts. Bei deaktiviertem Feature wird der Katalog mit dem Overlay 'Deaktiviert' markiert; nach Aktivierung erfolgt eine automatische Aktualisierung."));
+        bodyStack.Children.Add(CreateSection("Tray Klickverhalten", "Linksklick und Rechtsklick auf das Tasktray-Icon öffnen das Control Center."));
+        bodyStack.Children.Add(CreateSection("Config / Info", "Konfiguration speichern, neu laden und die App über 'Tool neu starten' mit kurzem Reload-Screen neu laden. Zusätzlich: Update-Status und Diagnose-/Versionsinfos."));
+        bodyStack.Children.Add(CreateSection("Logs", "'Logs öffnen' öffnet immer den Log-Ordner (nicht einzelne Dateien)."));
+        bodyStack.Children.Add(CreateHiddenRainbowPrincessTrigger());
+        bodyCard.Child = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Content = bodyStack
+        };
+
+        Grid.SetRow(bodyCard, 2);
+        root.Children.Add(bodyCard);
+
+        var actions = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 10
+        };
+
+        actions.Children.Add(CreateActionButton("📄", "Logs öffnen", (_, _) => OpenLogs()));
+        actions.Children.Add(CreateActionButton("⚙", "Config öffnen", (_, _) => OpenConfig()));
+        actions.Children.Add(CreateActionButton("🌐", "GitHub Repo", (_, _) => OpenRepo()));
+        actions.Children.Add(CreateActionButton("✓", "OK", (_, _) => Close()));
+
+        Grid.SetRow(actions, 4);
+        root.Children.Add(actions);
+
+        host.Children.Add(root);
+        return host;
+    }
+
+    private static Border CreateCard(double padding)
+    {
+        return new Border
+        {
+            Padding = new Thickness(padding),
+            CornerRadius = new CornerRadius(12),
+            BorderThickness = new Thickness(1),
+            BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush,
+            Background = Application.Current.Resources["PanelBackgroundBrush"] as Brush
+        };
+    }
+
+    private static Border CreateSection(string title, string text)
+    {
+        var section = new Border
+        {
+            Padding = new Thickness(12, 10, 12, 10),
+            CornerRadius = new CornerRadius(10),
+            BorderThickness = new Thickness(1),
+            BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush,
+            Background = Application.Current.Resources["SurfaceSoftBrush"] as Brush
+        };
+
+        var stack = new StackPanel { Spacing = 4 };
+        stack.Children.Add(new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        stack.Children.Add(new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Opacity = 0.86 });
+        section.Child = stack;
+        return section;
+    }
+
+    private static Button CreateActionButton(string icon, string text, RoutedEventHandler onClick)
+    {
+        var iconHost = new Grid
+        {
+            Width = 20,
+            Height = 20,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        iconHost.Children.Add(new Viewbox
+        {
+            Stretch = Stretch.Uniform,
+            Child = new TextBlock
+            {
+                Text = icon,
+                FontSize = 17,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        });
+
+        var button = new Button
+        {
+            Padding = new Thickness(10, 6, 10, 6),
+            CornerRadius = new CornerRadius(10),
+            BorderThickness = new Thickness(1),
+            BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush,
+            Background = Application.Current.Resources["SurfaceSoftBrush"] as Brush,
+            Content = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                Children =
+                {
+                    iconHost,
+                    new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold }
+                }
+            }
+        };
+
+        button.Click += onClick;
+        return button;
+    }
+
+    private Button CreateHiddenRainbowPrincessTrigger()
+    {
+        _rainbowHintText = new TextBlock
+        {
+            Text = "PS: Falls heute ungewoehnlich viele Trolle online sind, diese Zeile besser ignorieren.",
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 11,
+            Opacity = 0.34,
+            FontStyle = Windows.UI.Text.FontStyle.Italic
+        };
+
+        var button = new Button
+        {
+            Content = _rainbowHintText,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(2),
+            Margin = new Thickness(2, 4, 2, 0),
+            Background = new SolidColorBrush(Color.FromArgb(0x00, 0x00, 0x00, 0x00)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x00, 0x00, 0x00, 0x00)),
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(6)
+        };
+
+        button.Click += async (_, _) =>
+        {
+            if (Application.Current is App app)
+            {
+                _rainbowHintText.Text = "Troll Mode startet... Hilfe-Fenster wird evakuiert.";
+                Close();
+                _ = app.TriggerTrollModeAsync();
+            }
+        };
+
+        return button;
+    }
+
+    private static void OpenLogs()
+    {
+        var logsPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "HyperTool",
+            "logs");
+
+        Directory.CreateDirectory(logsPath);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = logsPath,
+            UseShellExecute = true
+        });
+    }
+
+    private void OpenConfig()
+    {
+        var directoryPath = Path.GetDirectoryName(_configPath);
+        if (!string.IsNullOrWhiteSpace(directoryPath))
+        {
+            Directory.CreateDirectory(directoryPath);
+        }
+
+        if (File.Exists(_configPath))
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"/select,\"{_configPath}\"",
+                UseShellExecute = true
+            });
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = directoryPath ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            UseShellExecute = true
+        });
+    }
+
+    private void OpenRepo()
+    {
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = _repoUrl,
+            UseShellExecute = true
+        });
+    }
+
+    private void ApplyRequestedTheme()
+    {
+        if (Content is FrameworkElement root)
+        {
+            root.RequestedTheme = _isDarkMode ? ElementTheme.Dark : ElementTheme.Light;
+        }
+    }
+
+    private void UpdateTitleBarAppearance()
+    {
+        try
+        {
+            if (AppWindow?.TitleBar is not AppWindowTitleBar titleBar)
+            {
+                return;
+            }
+
+            if (_isDarkMode)
+            {
+                titleBar.BackgroundColor = Color.FromArgb(0xFF, 0x17, 0x1F, 0x3A);
+                titleBar.ForegroundColor = Color.FromArgb(0xFF, 0xE8, 0xF0, 0xFF);
+                titleBar.InactiveBackgroundColor = Color.FromArgb(0xFF, 0x14, 0x1A, 0x31);
+                titleBar.InactiveForegroundColor = Color.FromArgb(0xFF, 0x98, 0xAE, 0xD3);
+                titleBar.ButtonBackgroundColor = Color.FromArgb(0xFF, 0x17, 0x1F, 0x3A);
+                titleBar.ButtonForegroundColor = Color.FromArgb(0xFF, 0xE8, 0xF0, 0xFF);
+                titleBar.ButtonHoverBackgroundColor = Color.FromArgb(0xFF, 0x22, 0x2D, 0x51);
+                titleBar.ButtonHoverForegroundColor = Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
+                titleBar.ButtonPressedBackgroundColor = Color.FromArgb(0xFF, 0x2A, 0x36, 0x61);
+                titleBar.ButtonPressedForegroundColor = Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
+                titleBar.ButtonInactiveBackgroundColor = Color.FromArgb(0xFF, 0x14, 0x1A, 0x31);
+                titleBar.ButtonInactiveForegroundColor = Color.FromArgb(0xFF, 0x98, 0xAE, 0xD3);
+            }
+            else
+            {
+                titleBar.BackgroundColor = Color.FromArgb(0xFF, 0xD8, 0xE9, 0xFF);
+                titleBar.ForegroundColor = Color.FromArgb(0xFF, 0x0F, 0x24, 0x3C);
+                titleBar.InactiveBackgroundColor = Color.FromArgb(0xFF, 0xE6, 0xF2, 0xFF);
+                titleBar.InactiveForegroundColor = Color.FromArgb(0xFF, 0x4E, 0x66, 0x83);
+                titleBar.ButtonBackgroundColor = Color.FromArgb(0xFF, 0xD8, 0xE9, 0xFF);
+                titleBar.ButtonForegroundColor = Color.FromArgb(0xFF, 0x0F, 0x24, 0x3C);
+                titleBar.ButtonHoverBackgroundColor = Color.FromArgb(0xFF, 0xC7, 0xDE, 0xFC);
+                titleBar.ButtonHoverForegroundColor = Color.FromArgb(0xFF, 0x0A, 0x1B, 0x30);
+                titleBar.ButtonPressedBackgroundColor = Color.FromArgb(0xFF, 0xBA, 0xD3, 0xF7);
+                titleBar.ButtonPressedForegroundColor = Color.FromArgb(0xFF, 0x08, 0x19, 0x2C);
+                titleBar.ButtonInactiveBackgroundColor = Color.FromArgb(0xFF, 0xE6, 0xF2, 0xFF);
+                titleBar.ButtonInactiveForegroundColor = Color.FromArgb(0xFF, 0x4E, 0x66, 0x83);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void TryApplyWindowIcon()
+    {
+        try
+        {
+            if (AppWindow is null)
+            {
+                return;
+            }
+
+            var iconPath = new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "Assets", "HyperTool.ico"),
+                Path.Combine(AppContext.BaseDirectory, "HyperTool.ico")
+            }.FirstOrDefault(File.Exists);
+
+            if (!string.IsNullOrWhiteSpace(iconPath))
+            {
+                AppWindow.SetIcon(iconPath);
+            }
+        }
+        catch
+        {
+        }
+    }
+}
