@@ -437,6 +437,8 @@ public partial class MainViewModel : ViewModelBase
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbDeviceMetadataByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbAttachedWithoutAckSinceUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _usbAttachedWithoutAckAttempts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _usbForceDetachFallbackBusIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _usbGuestManagedBusIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _resourceMonitorSync = new();
     private readonly Dictionary<string, VmResourceMonitorRuntimeState> _vmMonitorStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<double> _hostCpuHistory = new();
@@ -1929,6 +1931,8 @@ public partial class MainViewModel : ViewModelBase
         {
             _usbAttachedWithoutAckSinceUtc.Remove(obsoleteKey);
             _usbAttachedWithoutAckAttempts.Remove(obsoleteKey);
+            _usbForceDetachFallbackBusIds.Remove(obsoleteKey);
+            _usbGuestManagedBusIds.Remove(obsoleteKey);
         }
 
         var detachedCount = 0;
@@ -1941,19 +1945,24 @@ public partial class MainViewModel : ViewModelBase
             }
 
             var busId = device.BusId.Trim();
-
-            if (!string.Equals(device.ClientIpAddress?.Trim(), HyperVSocketUsbTunnelDefaults.LoopbackAddress, StringComparison.OrdinalIgnoreCase))
-            {
-                _usbAttachedWithoutAckSinceUtc.Remove(busId);
-                _usbAttachedWithoutAckAttempts.Remove(busId);
-                continue;
-            }
+            var forceDetachFallback = _usbForceDetachFallbackBusIds.Contains(busId);
+            var loopbackAttached = string.Equals(device.ClientIpAddress?.Trim(), HyperVSocketUsbTunnelDefaults.LoopbackAddress, StringComparison.OrdinalIgnoreCase);
+            var guestManaged = _usbGuestManagedBusIds.Contains(busId);
 
             if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, StaleUsbAttachGracePeriod, out _))
             {
+                _usbGuestManagedBusIds.Add(busId);
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
                 _usbAttachedWithoutAckAttempts.Remove(busId);
+                _usbForceDetachFallbackBusIds.Remove(busId);
                 continue;
+            }
+
+            // If diagnostics ACK delivery is disrupted, stale attached devices must still be
+            // recoverable via grace-period + retry detach (independent of loopback IP).
+            if (!forceDetachFallback && !loopbackAttached && !guestManaged)
+            {
+                Log.Debug("Tracking attached USB without guest ACK context. BusId={BusId}; ClientIp={ClientIp}", busId, device.ClientIpAddress);
             }
 
             if (!_usbAttachedWithoutAckSinceUtc.TryGetValue(busId, out var firstSeenUtc))
@@ -1994,6 +2003,8 @@ public partial class MainViewModel : ViewModelBase
             {
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
                 _usbAttachedWithoutAckAttempts.Remove(busId);
+                _usbForceDetachFallbackBusIds.Remove(busId);
+                _usbGuestManagedBusIds.Remove(busId);
                 Log.Debug("Skipped stale USB auto-detach after final ACK recheck. BusId={BusId}", busId);
                 continue;
             }
@@ -2004,6 +2015,8 @@ public partial class MainViewModel : ViewModelBase
                 detachedCount++;
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
                 _usbAttachedWithoutAckAttempts.Remove(busId);
+                _usbForceDetachFallbackBusIds.Remove(busId);
+                _usbGuestManagedBusIds.Remove(busId);
                 Log.Information("Stale attached USB device detached on host (missing guest ack). BusId={BusId}", busId);
             }
             catch (Exception ex)
@@ -3057,7 +3070,50 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        var vmToRemove = SelectedVmForConfig;
+        RemoveVmFromConfiguration(SelectedVmForConfig, showNotification: true);
+    }
+
+    public async Task<bool> RemoveVmByNameAsync(string? vmName)
+    {
+        var resolvedVmName = (vmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(resolvedVmName))
+        {
+            AddNotification("VM entfernen abgebrochen: VM-Name fehlt.", "Warning");
+            return false;
+        }
+
+        var removedFromHyperV = false;
+        await ExecuteBusyActionAsync($"VM '{resolvedVmName}' wird aus Hyper-V entfernt...", async token =>
+        {
+            await _hyperVService.RemoveVmAsync(resolvedVmName, token);
+            removedFromHyperV = true;
+            AddNotification($"VM '{resolvedVmName}' aus Hyper-V entfernt.", "Success");
+        }, showNotificationOnErrorOnly: true);
+
+        if (!removedFromHyperV)
+        {
+            return false;
+        }
+
+        var vmInConfig = AvailableVms.FirstOrDefault(item => string.Equals(item.Name, resolvedVmName, StringComparison.OrdinalIgnoreCase));
+        if (vmInConfig is not null)
+        {
+            RemoveVmFromConfiguration(vmInConfig, showNotification: false);
+        }
+
+        await LoadVmsFromHyperVAsync();
+        await RefreshVmStatusAsync();
+        NotifyTrayStateChanged();
+        return true;
+    }
+
+    private void RemoveVmFromConfiguration(VmDefinition vmToRemove, bool showNotification)
+    {
+        if (vmToRemove is null)
+        {
+            return;
+        }
+
         AvailableVms.Remove(vmToRemove);
 
         if (SelectedVm == vmToRemove)
@@ -3073,7 +3129,11 @@ public partial class MainViewModel : ViewModelBase
 
         SelectedVmForConfig = AvailableVms.FirstOrDefault();
         MarkConfigDirty();
-        AddNotification($"VM '{vmToRemove.Name}' aus Konfiguration entfernt.", "Warning");
+
+        if (showNotification)
+        {
+            AddNotification($"VM '{vmToRemove.Name}' aus Konfiguration entfernt.", "Warning");
+        }
     }
 
     private void SetDefaultVmFromSelection()
@@ -3804,6 +3864,54 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
+    private async Task<UsbIpDeviceInfo?> GetHostUsbStateAsync(string targetBusId, TimeSpan timeout)
+    {
+        using var stateCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+        stateCts.CancelAfter(timeout);
+
+        var devices = await _usbIpService.GetDevicesAsync(stateCts.Token);
+        return devices.FirstOrDefault(device =>
+            string.Equals(device.BusId?.Trim(), targetBusId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<bool> TryHardReleaseAndReshareAsync(string targetBusId)
+    {
+        // Last-resort recovery: remove share and re-share so stale attachment state is cleared.
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            try
+            {
+                using var resetCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+                resetCts.CancelAfter(TimeSpan.FromSeconds(18));
+
+                await _usbIpService.UnbindAsync(targetBusId, resetCts.Token);
+                await Task.Delay(TimeSpan.FromMilliseconds(380), resetCts.Token);
+                await _usbIpService.BindAsync(targetBusId, force: false, resetCts.Token);
+                await Task.Delay(TimeSpan.FromMilliseconds(460), resetCts.Token);
+
+                var state = await GetHostUsbStateAsync(targetBusId, TimeSpan.FromSeconds(8));
+                if (state is null || !state.IsAttached)
+                {
+                    Log.Warning(
+                        "USB hard release+reshare executed after disconnect detach fallback. BusId={BusId}; Attempt={Attempt}/2",
+                        targetBusId,
+                        attempt);
+                    return true;
+                }
+            }
+            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "USB hard release+reshare attempt failed. BusId={BusId}; Attempt={Attempt}/2", targetBusId, attempt);
+            }
+        }
+
+        return false;
+    }
+
     public async Task HandleUsbClientDisconnectedAsync(string busId)
     {
         var normalizedBusId = (busId ?? string.Empty).Trim();
@@ -3819,6 +3927,31 @@ public partial class MainViewModel : ViewModelBase
         {
             await _usbTrayRefreshGate.WaitAsync(_lifetimeCancellation.Token);
             gateEntered = true;
+
+            // Re-check current host state first. If the guest already released the device,
+            // there is nothing to detach and no fallback scheduling is needed.
+            try
+            {
+                var hostDevice = await GetHostUsbStateAsync(normalizedBusId, TimeSpan.FromSeconds(8));
+
+                if (hostDevice is null || !hostDevice.IsAttached)
+                {
+                    _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
+                    _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
+                    _usbForceDetachFallbackBusIds.Remove(normalizedBusId);
+                    _usbGuestManagedBusIds.Remove(normalizedBusId);
+                    Log.Information("USB detach skipped after client disconnect because device is already free. BusId={BusId}", normalizedBusId);
+                    return;
+                }
+            }
+            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "USB state pre-check before disconnect detach failed. BusId={BusId}", normalizedBusId);
+            }
 
             var immediateDetachAttempts = Math.Clamp(_usbAutoDetachRetryAttempts, 1, 3);
             Exception? lastDetachError = null;
@@ -3863,15 +3996,45 @@ public partial class MainViewModel : ViewModelBase
 
             if (detached)
             {
-                _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
-                _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
-                await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
-                return;
+                try
+                {
+                    var hostDevice = await GetHostUsbStateAsync(normalizedBusId, TimeSpan.FromSeconds(8));
+                    if (hostDevice is null || !hostDevice.IsAttached)
+                    {
+                        _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
+                        _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
+                        _usbForceDetachFallbackBusIds.Remove(normalizedBusId);
+                        _usbGuestManagedBusIds.Remove(normalizedBusId);
+                        await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
+                        return;
+                    }
+
+                    var recoveredByReset = await TryHardReleaseAndReshareAsync(normalizedBusId);
+                    if (recoveredByReset)
+                    {
+                        _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
+                        _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
+                        _usbForceDetachFallbackBusIds.Remove(normalizedBusId);
+                        _usbGuestManagedBusIds.Remove(normalizedBusId);
+                        await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
+                        return;
+                    }
+                }
+                catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Post-detach release verification failed. BusId={BusId}", normalizedBusId);
+                }
             }
 
             // Fall back to stale-ack auto-detach path with an accelerated first-seen timestamp.
             _usbAttachedWithoutAckSinceUtc[normalizedBusId] = DateTimeOffset.UtcNow - StaleUsbAttachGracePeriod;
             _usbAttachedWithoutAckAttempts[normalizedBusId] = Math.Max(_usbAutoDetachRetryAttempts - 1, 0);
+            _usbForceDetachFallbackBusIds.Add(normalizedBusId);
+            _usbGuestManagedBusIds.Add(normalizedBusId);
 
             Log.Warning(
                 lastDetachError,

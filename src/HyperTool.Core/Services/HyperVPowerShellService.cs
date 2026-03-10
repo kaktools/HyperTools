@@ -58,6 +58,28 @@ public sealed class HyperVPowerShellService : IHyperVService
     public Task RestartVmAsync(string vmName, CancellationToken cancellationToken) =>
         InvokeNonQueryAsync($"Restart-VM -VMName {ToPsSingleQuoted(vmName)} -Force -Confirm:$false", cancellationToken);
 
+    public async Task RemoveVmAsync(string vmName, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(vmName))
+        {
+            throw new ArgumentException("VM-Name darf nicht leer sein.", nameof(vmName));
+        }
+
+        var script =
+            "$vmName = " + ToPsSingleQuoted(vmName) + "; " +
+            "$vm = Get-VM -Name $vmName -ErrorAction Stop; " +
+            "Remove-VM -VM $vm -Force -Confirm:$false";
+
+        try
+        {
+            await InvokeNonQueryAsync(script, cancellationToken);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            await InvokeElevatedPowerShellAsync(script, "VM entfernen", cancellationToken);
+        }
+    }
+
     public Task RenameVmAsync(string vmName, string newVmName, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(vmName))

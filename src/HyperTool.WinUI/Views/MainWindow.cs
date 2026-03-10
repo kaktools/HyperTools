@@ -1841,6 +1841,7 @@ public sealed class MainWindow : Window
         actionRow2.Children.Add(CreateIconButton("🛠", "Konsole neu aufbauen", _viewModel.ReopenConsoleWithSessionEditCommand));
         actionRow2.Children.Add(CreateIconButton("✎", "VM umbenennen", onClick: async (_, _) => await RenameSelectedVmWithPromptAsync()));
         actionRow2.Children.Add(CreateIconButton("⚙", "CPU / RAM", onClick: async (_, _) => await EditSelectedVmComputeResourcesAsync()));
+        actionRow2.Children.Add(CreateIconButton("🗑", "VM entfernen", onClick: async (_, _) => await RemoveSelectedVmWithConfirmationAsync()));
         _mountIsoButton = CreateIconButton("💿", "ISO einbinden", onClick: async (_, _) =>
         {
             if (_viewModel.SelectedVm is not null)
@@ -4562,6 +4563,8 @@ public sealed class MainWindow : Window
         }
 
         flyout.Items.Add(new MenuFlyoutSeparator());
+        flyout.Items.Add(CreateVmMenuItem("VM entfernen", () => RemoveVmWithConfirmationAsync(vm)));
+        flyout.Items.Add(new MenuFlyoutSeparator());
         flyout.Items.Add(CreateVmMenuItem("Als Default-VM setzen", () => SetDefaultVmFromChipAsync(vm)));
         flyout.Items.Add(CreateVmMenuItem("Schnellstart-Verknüpfung erstellen", () => CreateVmQuickstartForVmAsync(vm)));
         flyout.Items.Add(new MenuFlyoutSeparator());
@@ -4734,6 +4737,8 @@ public sealed class MainWindow : Window
         {
             flyout.Items.Add(CreateVmMenuItem("ISO einbinden", () => MountIsoForVmAsync(vm)));
         }
+        flyout.Items.Add(new MenuFlyoutSeparator());
+        flyout.Items.Add(CreateVmMenuItem("VM entfernen", () => RemoveVmWithConfirmationAsync(vm)));
         flyout.Items.Add(new MenuFlyoutSeparator());
         flyout.Items.Add(CreateVmMenuItem("Als Default-VM setzen", () => SetDefaultVmFromChipAsync(vm)));
         flyout.Items.Add(new MenuFlyoutSeparator());
@@ -5086,6 +5091,53 @@ public sealed class MainWindow : Window
         var selectedRam = (int)Math.Round(ramNumberBox.Value);
         var updated = await _viewModel.UpdateVmComputeResourcesAsync(vm.Name, selectedCpu, selectedRam);
         if (updated)
+        {
+            RequestVmChipsRefresh();
+        }
+    }
+
+    private async Task RemoveSelectedVmWithConfirmationAsync()
+    {
+        if (_viewModel.SelectedVm is null)
+        {
+            _viewModel.PublishNotification("Keine VM ausgewählt.", "Warning");
+            return;
+        }
+
+        await RemoveVmWithConfirmationAsync(_viewModel.SelectedVm);
+    }
+
+    private async Task RemoveVmWithConfirmationAsync(VmDefinition vm)
+    {
+        if (vm is null || string.IsNullOrWhiteSpace(vm.Name))
+        {
+            return;
+        }
+
+        var xamlRoot = TryGetDialogXamlRoot();
+        if (xamlRoot is null)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = xamlRoot,
+            Title = "VM entfernen",
+            Content = $"Soll die VM '{vm.Name}' wirklich aus der Konfiguration entfernt werden?",
+            PrimaryButtonText = "Ja, entfernen",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Close
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var removed = await _viewModel.RemoveVmByNameAsync(vm.Name);
+        if (removed)
         {
             RequestVmChipsRefresh();
         }

@@ -1,5 +1,38 @@
 # HyperTool Release Notes
 
+## v2.4.4
+
+### Highlights
+
+- USB Disconnect/Detach zwischen Guest und Host wurde end-to-end nachgeschärft (Sofort-Detach + Fallback mit Grace/Retry).
+- Host-Diagnostics-Ack-Verarbeitung ist jetzt fehlertolerant, damit Disconnect-Erkennung nicht mehr durch einzelne Callback-Fehler verloren geht.
+- USB Share verwendet wieder durchgängig normales `bind --busid` ohne `--force`.
+
+### Verbessert
+
+- Host Auto-Detach:
+	- Sofortversuche nach `usb-disconnected` Event mit mehreren Retries.
+	- Zusätzliche Zustandsprüfung und beschleunigter Fallback für unerreichbare Guests.
+	- Tracking für guest-verwaltete Attachments robuster gemacht, auch wenn Ack-/Transportpfade schwanken.
+- Host Diagnostics:
+	- Ack-Pipeline zentralisiert und in Teilschritte mit isoliertem Fehlerhandling aufgeteilt.
+	- USB-Disconnect- und Refresh-Trigger bleiben aktiv, auch wenn ein anderer Ack-Teilpfad fehlschlägt.
+- Guest/Host USB-Listen:
+	- Unnötige Full-Rebuilds reduziert, wodurch sporadisches Flackern bei Auto-Refresh/Identity-Updates deutlich abnimmt.
+- VM-Verwaltung:
+	- `VM entfernen` im VM-Menü und per Rechtsklick mit Bestätigungsdialog ergänzt.
+	- Entfernen löscht die VM jetzt tatsächlich aus Hyper-V (`Remove-VM`) statt nur aus der lokalen Konfiguration.
+
+### Behoben
+
+- Regression im USB-Freigabezyklus adressiert, bei der Geräte nach Guest-Disconnect im Host als `Attached` hängenbleiben konnten.
+- Host/Guest-Namensanzeige für USB-Geräte wieder konsistent, da Host-Identity-Payload die Beschreibungen zuverlässig überträgt.
+- VM-Remove-Flow korrigiert: vorher nur Konfigurationsentfernung (`aus Konfiguration entfernt`), jetzt echte Hyper-V-Löschung.
+
+### Doku
+
+- README auf `v2.4.4` aktualisiert (Release-Stand + Build-Beispiele).
+
 ## v2.4.2
 
 ### Highlights

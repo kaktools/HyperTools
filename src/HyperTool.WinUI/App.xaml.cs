@@ -237,62 +237,7 @@ public sealed partial class App : Application
                 _usbHostTunnel.Start();
                 Log.Information("Hyper-V socket USB host tunnel started.");
 
-                _usbDiagnosticsHostListener = new HyperVSocketDiagnosticsHostListener(ack =>
-                {
-                    UsbGuestConnectionRegistry.UpdateFromDiagnosticsAck(ack);
-                    GuestNetworkDiagnosticsRegistry.UpdateFromDiagnosticsAck(ack);
-                    _mainViewModel?.RefreshVmNetworkDiagnosticsFromRegistry();
-
-                    if (_mainViewModel is not null
-                        && !string.IsNullOrWhiteSpace(ack.GuestComputerName)
-                        && ack.GuestCpuPercent.HasValue
-                        && ack.GuestRamUsedGb.HasValue
-                        && ack.GuestRamTotalGb.HasValue)
-                    {
-                        _mainViewModel.UpdateGuestResourceMonitoring(new ResourceMonitorPacket
-                        {
-                            Vm = ack.GuestComputerName,
-                            Cpu = ack.GuestCpuPercent.Value,
-                            RamUsed = ack.GuestRamUsedGb.Value,
-                            RamTotal = ack.GuestRamTotalGb.Value,
-                            SentAtUtc = ack.SentAtUtc ?? DateTime.UtcNow.ToString("O")
-                        });
-                    }
-
-                    if (_mainViewModel is not null
-                        && !string.IsNullOrWhiteSpace(ack.BusId)
-                        && string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _ = HandleUsbClientDisconnectEventAsync(ack.BusId);
-                    }
-
-                    if (_mainViewModel is not null
-                        && !string.IsNullOrWhiteSpace(ack.BusId)
-                        && (string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        TriggerHostUsbRefreshForDiagnosticsEvent();
-                    }
-
-                    Log.Information(
-                    "Hyper-V socket diagnostics acknowledged. EventType={EventType}; BusId={BusId}; GuestComputerName={GuestComputerName}; HostComputerName={HostComputerName}; GuestHyperVSocketActive={GuestHyperVSocketActive}; GuestRegistryServiceOk={GuestRegistryServiceOk}; GuestIpv4Address={GuestIpv4Address}; GuestIpv4SubnetMask={GuestIpv4SubnetMask}; GuestIpv4Gateway={GuestIpv4Gateway}; GuestCpuPercent={GuestCpuPercent}; GuestRamUsedGb={GuestRamUsedGb}; GuestRamTotalGb={GuestRamTotalGb}; GuestSentAtUtc={GuestSentAtUtc}; UsbTunnelActive={UsbTunnelActive}; RegistryServiceOk={RegistryServiceOk}",
-                    ack.EventType,
-                    ack.BusId,
-                    ack.GuestComputerName,
-                        Environment.MachineName,
-                    ack.HyperVSocketActive,
-                    ack.RegistryServiceOk,
-                    ack.GuestIpv4Address,
-                    ack.GuestIpv4SubnetMask,
-                    ack.GuestIpv4Gateway,
-                    ack.GuestCpuPercent,
-                    ack.GuestRamUsedGb,
-                    ack.GuestRamTotalGb,
-                    ack.SentAtUtc,
-                        _usbHostTunnel?.IsRunning == true,
-                        HyperVSocketUsbHostTunnel.IsServiceRegistered());
-                });
+                _usbDiagnosticsHostListener = new HyperVSocketDiagnosticsHostListener(ack => ProcessDiagnosticsAck(ack, isThemeRestart: false));
                 _usbDiagnosticsHostListener.Start();
                 Log.Information("Hyper-V socket diagnostics listener started.");
             }
@@ -527,62 +472,7 @@ public sealed partial class App : Application
                 _usbHostTunnel.Start();
                 Log.Information("Hyper-V socket USB host tunnel restarted after theme change.");
 
-                _usbDiagnosticsHostListener = new HyperVSocketDiagnosticsHostListener(ack =>
-                {
-                    UsbGuestConnectionRegistry.UpdateFromDiagnosticsAck(ack);
-                    GuestNetworkDiagnosticsRegistry.UpdateFromDiagnosticsAck(ack);
-                    _mainViewModel?.RefreshVmNetworkDiagnosticsFromRegistry();
-
-                    if (_mainViewModel is not null
-                        && !string.IsNullOrWhiteSpace(ack.GuestComputerName)
-                        && ack.GuestCpuPercent.HasValue
-                        && ack.GuestRamUsedGb.HasValue
-                        && ack.GuestRamTotalGb.HasValue)
-                    {
-                        _mainViewModel.UpdateGuestResourceMonitoring(new ResourceMonitorPacket
-                        {
-                            Vm = ack.GuestComputerName,
-                            Cpu = ack.GuestCpuPercent.Value,
-                            RamUsed = ack.GuestRamUsedGb.Value,
-                            RamTotal = ack.GuestRamTotalGb.Value,
-                            SentAtUtc = ack.SentAtUtc ?? DateTime.UtcNow.ToString("O")
-                        });
-                    }
-
-                    if (_mainViewModel is not null
-                        && !string.IsNullOrWhiteSpace(ack.BusId)
-                        && string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _ = HandleUsbClientDisconnectEventAsync(ack.BusId);
-                    }
-
-                    if (_mainViewModel is not null
-                        && !string.IsNullOrWhiteSpace(ack.BusId)
-                        && (string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        TriggerHostUsbRefreshForDiagnosticsEvent();
-                    }
-
-                    Log.Information(
-                    "Hyper-V socket diagnostics acknowledged (theme restart). EventType={EventType}; BusId={BusId}; GuestComputerName={GuestComputerName}; HostComputerName={HostComputerName}; GuestHyperVSocketActive={GuestHyperVSocketActive}; GuestRegistryServiceOk={GuestRegistryServiceOk}; GuestIpv4Address={GuestIpv4Address}; GuestIpv4SubnetMask={GuestIpv4SubnetMask}; GuestIpv4Gateway={GuestIpv4Gateway}; GuestCpuPercent={GuestCpuPercent}; GuestRamUsedGb={GuestRamUsedGb}; GuestRamTotalGb={GuestRamTotalGb}; GuestSentAtUtc={GuestSentAtUtc}; UsbTunnelActive={UsbTunnelActive}; RegistryServiceOk={RegistryServiceOk}",
-                    ack.EventType,
-                    ack.BusId,
-                    ack.GuestComputerName,
-                        Environment.MachineName,
-                    ack.HyperVSocketActive,
-                    ack.RegistryServiceOk,
-                    ack.GuestIpv4Address,
-                    ack.GuestIpv4SubnetMask,
-                    ack.GuestIpv4Gateway,
-                    ack.GuestCpuPercent,
-                    ack.GuestRamUsedGb,
-                    ack.GuestRamTotalGb,
-                    ack.SentAtUtc,
-                        _usbHostTunnel?.IsRunning == true,
-                        HyperVSocketUsbHostTunnel.IsServiceRegistered());
-                });
+                _usbDiagnosticsHostListener = new HyperVSocketDiagnosticsHostListener(ack => ProcessDiagnosticsAck(ack, isThemeRestart: true));
                 _usbDiagnosticsHostListener.Start();
                 Log.Information("Hyper-V socket diagnostics listener restarted after theme change.");
             }
@@ -2137,6 +2027,136 @@ public sealed partial class App : Application
         await _mainViewModel.RefreshUsbDevicesFromTrayAsync();
     }
 
+    private void ProcessDiagnosticsAck(HyperVSocketDiagnosticsAck ack, bool isThemeRestart)
+    {
+        try
+        {
+            UsbGuestConnectionRegistry.UpdateFromDiagnosticsAck(ack);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Diagnostics ack registry update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
+        }
+
+        try
+        {
+            if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
+            {
+                _ = queue.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        GuestNetworkDiagnosticsRegistry.UpdateFromDiagnosticsAck(ack);
+                        _mainViewModel?.RefreshVmNetworkDiagnosticsFromRegistry();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Diagnostics ack network update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
+                    }
+                });
+            }
+            else
+            {
+                GuestNetworkDiagnosticsRegistry.UpdateFromDiagnosticsAck(ack);
+                _mainViewModel?.RefreshVmNetworkDiagnosticsFromRegistry();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Diagnostics ack network update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
+        }
+
+        if (_mainViewModel is not null
+            && !string.IsNullOrWhiteSpace(ack.GuestComputerName)
+            && ack.GuestCpuPercent.HasValue
+            && ack.GuestRamUsedGb.HasValue
+            && ack.GuestRamTotalGb.HasValue)
+        {
+            try
+            {
+                if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
+                {
+                    _ = queue.TryEnqueue(() =>
+                    {
+                        try
+                        {
+                            _mainViewModel.UpdateGuestResourceMonitoring(new ResourceMonitorPacket
+                            {
+                                Vm = ack.GuestComputerName,
+                                Cpu = ack.GuestCpuPercent.Value,
+                                RamUsed = ack.GuestRamUsedGb.Value,
+                                RamTotal = ack.GuestRamTotalGb.Value,
+                                SentAtUtc = ack.SentAtUtc ?? DateTime.UtcNow.ToString("O")
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Warning(ex, "Diagnostics ack resource update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
+                        }
+                    });
+                }
+                else
+                {
+                    _mainViewModel.UpdateGuestResourceMonitoring(new ResourceMonitorPacket
+                    {
+                        Vm = ack.GuestComputerName,
+                        Cpu = ack.GuestCpuPercent.Value,
+                        RamUsed = ack.GuestRamUsedGb.Value,
+                        RamTotal = ack.GuestRamTotalGb.Value,
+                        SentAtUtc = ack.SentAtUtc ?? DateTime.UtcNow.ToString("O")
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Diagnostics ack resource update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
+            }
+        }
+
+        if (_mainViewModel is not null
+            && !string.IsNullOrWhiteSpace(ack.BusId)
+            && string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
+            {
+                _ = queue.TryEnqueue(() => _ = HandleUsbClientDisconnectEventAsync(ack.BusId));
+            }
+            else
+            {
+                _ = HandleUsbClientDisconnectEventAsync(ack.BusId);
+            }
+        }
+
+        if (_mainViewModel is not null
+            && !string.IsNullOrWhiteSpace(ack.BusId)
+            && (string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)))
+        {
+            TriggerHostUsbRefreshForDiagnosticsEvent();
+        }
+
+        Log.Information(
+            isThemeRestart
+                ? "Hyper-V socket diagnostics acknowledged (theme restart). EventType={EventType}; BusId={BusId}; GuestComputerName={GuestComputerName}; HostComputerName={HostComputerName}; GuestHyperVSocketActive={GuestHyperVSocketActive}; GuestRegistryServiceOk={GuestRegistryServiceOk}; GuestIpv4Address={GuestIpv4Address}; GuestIpv4SubnetMask={GuestIpv4SubnetMask}; GuestIpv4Gateway={GuestIpv4Gateway}; GuestCpuPercent={GuestCpuPercent}; GuestRamUsedGb={GuestRamUsedGb}; GuestRamTotalGb={GuestRamTotalGb}; GuestSentAtUtc={GuestSentAtUtc}; UsbTunnelActive={UsbTunnelActive}; RegistryServiceOk={RegistryServiceOk}"
+                : "Hyper-V socket diagnostics acknowledged. EventType={EventType}; BusId={BusId}; GuestComputerName={GuestComputerName}; HostComputerName={HostComputerName}; GuestHyperVSocketActive={GuestHyperVSocketActive}; GuestRegistryServiceOk={GuestRegistryServiceOk}; GuestIpv4Address={GuestIpv4Address}; GuestIpv4SubnetMask={GuestIpv4SubnetMask}; GuestIpv4Gateway={GuestIpv4Gateway}; GuestCpuPercent={GuestCpuPercent}; GuestRamUsedGb={GuestRamUsedGb}; GuestRamTotalGb={GuestRamTotalGb}; GuestSentAtUtc={GuestSentAtUtc}; UsbTunnelActive={UsbTunnelActive}; RegistryServiceOk={RegistryServiceOk}",
+            ack.EventType,
+            ack.BusId,
+            ack.GuestComputerName,
+            Environment.MachineName,
+            ack.HyperVSocketActive,
+            ack.RegistryServiceOk,
+            ack.GuestIpv4Address,
+            ack.GuestIpv4SubnetMask,
+            ack.GuestIpv4Gateway,
+            ack.GuestCpuPercent,
+            ack.GuestRamUsedGb,
+            ack.GuestRamTotalGb,
+            ack.SentAtUtc,
+            _usbHostTunnel?.IsRunning == true,
+            HyperVSocketUsbHostTunnel.IsServiceRegistered());
+    }
+
     private async Task HandleUsbClientDisconnectEventAsync(string busId)
     {
         if (_mainViewModel is null
@@ -2144,6 +2164,29 @@ public sealed partial class App : Application
             || _isThemeWindowReopenInProgress
             || string.IsNullOrWhiteSpace(busId))
         {
+            return;
+        }
+
+        if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
+        {
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!queue.TryEnqueue(async () =>
+                {
+                    try
+                    {
+                        await HandleUsbClientDisconnectEventAsync(busId);
+                        completion.TrySetResult(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.TrySetException(ex);
+                    }
+                }))
+            {
+                return;
+            }
+
+            await completion.Task;
             return;
         }
 

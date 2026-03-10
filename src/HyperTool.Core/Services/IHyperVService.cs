@@ -14,6 +14,8 @@ public interface IHyperVService
 
     Task RestartVmAsync(string vmName, CancellationToken cancellationToken);
 
+    Task RemoveVmAsync(string vmName, CancellationToken cancellationToken);
+
     Task RenameVmAsync(string vmName, string newVmName, CancellationToken cancellationToken);
 
     Task<VmComputeSettingsInfo> GetVmComputeSettingsAsync(string vmName, CancellationToken cancellationToken);

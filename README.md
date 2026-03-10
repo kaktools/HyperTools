@@ -4,10 +4,16 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.4.2**
+- Version: **v2.4.4**
+- USB Disconnect/Detach-Flow zwischen Guest und Host weiter stabilisiert: Disconnect-Events, Fallback-Retries und Host-seitige Recovery-Pfade greifen zuverlässiger.
+- Host verarbeitet Hyper-V-Diagnostics-Acks robuster, sodass USB-Disconnect-Erkennung nicht mehr durch einzelne Callback-Fehler ausfällt.
+- USB Share nutzt wieder konsistent `bind --busid` ohne `--force`.
+- Guest/Host USB-Listen wurden gegen unnötiges Neuaufbauen entschärft (weniger Flackern bei Auto-Refresh und Identity-Updates).
+- Host-Identity liefert USB-Gerätebeschreibungen konsistent an den Guest, damit Namen zwischen Host und Guest sauber übereinstimmen.
 - Resource-Monitor-Fenster feinjustiert: +5 px Breite, damit bei 2 VMs sauber ohne horizontale Scrollbar gearbeitet wird.
 - Sidebar im Host um weitere 10 px verschlankt und vertikal gleichmäßig verteilt (gleiche Abstände zwischen Buttons sowie zu oben/unten).
 - VM-Chips aktualisieren sich robuster: bei Monitor-Events und zusätzlich periodisch, damit Statuswechsel nach VM-Start sichtbar ankommen.
+- VM-Entfernen ist jetzt als echte Löschaktion umgesetzt: nach Bestätigung wird die VM aus Hyper-V entfernt (nicht nur aus der UI-Konfiguration).
 - Shared Folder ist end-to-end integriert: Host-Katalog/Freigaben + Guest-Mounting über `hypertool-file`.
 - Guest nutzt `WinFsp` als zusätzliche Runtime für Shared-Folder-Mounts inkl. Runtime-Status, Installationshinweis und Quellenangabe.
 - Host und Guest enthalten konsistente Runtime-Statusanzeigen (USB/Shared Folder) mit Installations- und Neustart-Aktionen.
@@ -36,6 +42,7 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 ### Host (HyperTool.exe)
 
 - VM-Aktionen: Start, Stop, Hard Off, Restart, Konsole.
+- VM löschen: per VM-Menü/Rechtsklick mit Bestätigungsdialog; entfernt die VM aus Hyper-V.
 - Netzwerk: adaptergenaues Switch-Handling (auch Multi-NIC).
 - Host-Network-Details: klare Status-Chips für `Gateway` (grün) und `Default Switch` (orange), dark/light lesbar.
 - Snapshots: Baumdarstellung mit Restore/Delete/Create.
@@ -126,23 +133,23 @@ Legacy-Hinweis für Guestx86:
 ### Host
 
 - build-host.bat
-- build-installer-host.bat version=2.4.2
+- build-installer-host.bat version=2.4.4
 
 ### Guest
 
 - build-guest.bat
-- build-installer-guest.bat version=2.4.2
+- build-installer-guest.bat version=2.4.4
 
 ### Guestx86 (Legacy WPF)
 
 - build-guestx86.bat
 - build_guestx86.bat
-- build_installer_guestx86.bat version=2.4.2
+- build_installer_guestx86.bat version=2.4.4
 
 ### Komplett
 
 - build-all.bat
-- build-all.bat version=2.4.2 host guest host-installer guest-installer no-pause
+- build-all.bat version=2.4.4 host guest host-installer guest-installer no-pause
 
 Ausgaben:
 
