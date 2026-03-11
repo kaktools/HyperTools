@@ -4946,9 +4946,10 @@ public sealed class MainWindow : Window
     {
         try
         {
-            var discoPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "disco.mp3");
-            if (!File.Exists(discoPath))
+            var discoPath = ResolveDiscoAudioPath();
+            if (string.IsNullOrWhiteSpace(discoPath) || !File.Exists(discoPath))
             {
+                _viewModel.PublishNotification("Disco-Audio nicht gefunden (Assets/disco.mp3).", "Info");
                 return;
             }
 
@@ -4956,10 +4957,10 @@ public sealed class MainWindow : Window
 
             var player = new MediaPlayer
             {
-                AudioCategory = MediaPlayerAudioCategory.SoundEffects,
-                Volume = 0.42,
+                AudioCategory = MediaPlayerAudioCategory.Media,
+                Volume = 0.62,
                 IsLoopingEnabled = true,
-                Source = MediaSource.CreateFromUri(new Uri(discoPath))
+                Source = MediaSource.CreateFromUri(new Uri(discoPath, UriKind.Absolute))
             };
 
             _performanceDiscoPlayer = player;
@@ -4984,6 +4985,20 @@ public sealed class MainWindow : Window
         {
             _performanceDiscoPlayer = null;
         }
+    }
+
+    private string? ResolveDiscoAudioPath()
+    {
+        var baseDir = AppContext.BaseDirectory;
+        var candidates = new[]
+        {
+            System.IO.Path.Combine(baseDir, "Assets", "disco.mp3"),
+            System.IO.Path.Combine(baseDir, "disco.mp3"),
+            System.IO.Path.Combine(Environment.CurrentDirectory, "Assets", "disco.mp3"),
+            System.IO.Path.Combine(Environment.CurrentDirectory, "src", "HyperTool.WinUI", "Assets", "disco.mp3")
+        };
+
+        return candidates.FirstOrDefault(File.Exists);
     }
 
     private IEnumerable<Button> EnumerateButtons(DependencyObject root)

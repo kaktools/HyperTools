@@ -4,31 +4,16 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.4.4**
-- USB Disconnect/Detach-Flow zwischen Guest und Host weiter stabilisiert: Disconnect-Events, Fallback-Retries und Host-seitige Recovery-Pfade greifen zuverlässiger.
-- Host verarbeitet Hyper-V-Diagnostics-Acks robuster, sodass USB-Disconnect-Erkennung nicht mehr durch einzelne Callback-Fehler ausfällt.
-- USB Share nutzt wieder konsistent `bind --busid` ohne `--force`.
-- Guest/Host USB-Listen wurden gegen unnötiges Neuaufbauen entschärft (weniger Flackern bei Auto-Refresh und Identity-Updates).
-- Host-Identity liefert USB-Gerätebeschreibungen konsistent an den Guest, damit Namen zwischen Host und Guest sauber übereinstimmen.
-- Resource-Monitor-Fenster feinjustiert: +5 px Breite, damit bei 2 VMs sauber ohne horizontale Scrollbar gearbeitet wird.
-- Sidebar im Host um weitere 10 px verschlankt und vertikal gleichmäßig verteilt (gleiche Abstände zwischen Buttons sowie zu oben/unten).
-- VM-Chips aktualisieren sich robuster: bei Monitor-Events und zusätzlich periodisch, damit Statuswechsel nach VM-Start sichtbar ankommen.
-- VM-Entfernen ist jetzt als echte Löschaktion umgesetzt: nach Bestätigung wird die VM aus Hyper-V entfernt (nicht nur aus der UI-Konfiguration).
-- Shared Folder ist end-to-end integriert: Host-Katalog/Freigaben + Guest-Mounting über `hypertool-file`.
-- Guest nutzt `WinFsp` als zusätzliche Runtime für Shared-Folder-Mounts inkl. Runtime-Status, Installationshinweis und Quellenangabe.
-- Host und Guest enthalten konsistente Runtime-Statusanzeigen (USB/Shared Folder) mit Installations- und Neustart-Aktionen.
-- `Tool neu starten` ist in Host/Guest (USB/Shared Folder/Config) vereinheitlicht und zeigt wie beim Theme-Wechsel kurz den Reload-Screen.
-- Info-Menü in Host und Guest enthält jetzt einen gelben `Buy Me a Coffee`-Support-Button.
-- Guest-Info führt externe Quellen (`usbip-win2`, `winfsp`) nebeneinander mit symmetrischem Kartenlayout.
-- Host VM-Chips wurden visuell nachgeschliffen (kompaktere Breite, klarere Default-Markierung, größere/lesbarere Icon-Badges).
-- Default-VM und Schnellstart-Verknüpfung sind als direkte VM-Kontextaktionen verfügbar (Chip-/VM-Menü).
-- Header-Status wurde präzisiert: `Selected VM` zeigt den VM-State farbig und theme-sensitiv (Running/Off + Dark/Light).
-- Guest-Header verhält sich stabiler: VM-Chips sind konsistent unter dem Titel angeordnet und vermeiden Resize-Jitter.
-- Ungespeicherte Konfigurationsänderungen verhalten sich in Host und Guest konsistent beim Navigieren/Neu-Laden.
-- Host-Netzprofil wird im VM-Bereich sichtbar angezeigt und kann direkt auf `Privat`/`Öffentlich` umgestellt werden (Domäne gesperrt).
-- Host-Network zeigt pro Adapter das erkannte Netzprofil inkl. direkter Umstellung mit UAC-Elevation.
-- Snapshot-Aktionen im Host wurden auf Dialog-Flow umgestellt (Create-Prompt, Restore/Delete-Bestätigung).
-- NumLock-Wächter im Host ist per Checkbox aktivierbar und hält NumLock optional im Hintergrund aktiv (Intervall per Config).
+- Version: **v2.4.5**
+- Resource-Monitor Host-Layout überarbeitet: Prozessor- und Arbeitsspeicher-KPI sind zentriert über ihren jeweiligen Trends ausgerichtet.
+- Resource-Monitor VM-Ansicht priorisiert verbundene VMs und nutzt horizontales Scrolling für zusätzliche Karten.
+- Resource-Monitor ist bei Snapshot-/Refresh-Aussetzern robuster (letzte gültige Werte bleiben sichtbar, kein Leerzustand mehr).
+- Bezeichnungen im Monitor wurden vereinheitlicht (`Ressourcenmonitor`, `Prozessor`, `Arbeitsspeicher-Auslastung`, `Verlauf`).
+- Versteckter Button `Leistungsoptimierung` im Resource-Monitor startet den 20s-Disco-Flow im Haupttool mit anschließendem Reload.
+- Disco-Modus im Host wieder sichtbar ausgebaut (Overlay, Farbverläufe, Blink-/Flash-Effekte und variierende Logo-Drehungen).
+- Disco-Intensität in drei Stufen ergänzt (`Soft`, `Classic`, `Hardcore`) bei unverändertem 20s-Flow.
+- Asset-Paketierung erweitert: `Assets/*.mp3` wird in den Output kopiert (fix für `disco.mp3` im Disco-Modus).
+- USB-Konfigurationsmigration zeigt in Host und Guest eine sichtbare Einmal-Info (nicht nur Feed-Notification).
 
 ## Projekte
 
@@ -133,23 +118,23 @@ Legacy-Hinweis für Guestx86:
 ### Host
 
 - build-host.bat
-- build-installer-host.bat version=2.4.4
+- build-installer-host.bat version=2.4.5
 
 ### Guest
 
 - build-guest.bat
-- build-installer-guest.bat version=2.4.4
+- build-installer-guest.bat version=2.4.5
 
 ### Guestx86 (Legacy WPF)
 
 - build-guestx86.bat
 - build_guestx86.bat
-- build_installer_guestx86.bat version=2.4.4
+- build_installer_guestx86.bat version=2.4.5
 
 ### Komplett
 
 - build-all.bat
-- build-all.bat version=2.4.4 host guest host-installer guest-installer no-pause
+- build-all.bat version=2.4.5 host guest host-installer guest-installer no-pause
 
 Ausgaben:
 

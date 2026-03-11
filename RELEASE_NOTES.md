@@ -1,5 +1,38 @@
 # HyperTool Release Notes
 
+## v2.4.5
+
+### Highlights
+
+- Resource-Monitor wurde visuell und funktional überarbeitet (stabilere Host-Darstellung, sauberere KPI-Ausrichtung, konsistente Benennungen).
+- Versteckter `Leistungsoptimierung`-Trigger im Monitor startet einen 20-Sekunden-Disco-Modus im Haupttool mit anschließendem Reload.
+- Disco-Visuals wurden als voll sichtbarer Modus wiederhergestellt (Overlay, Farbverläufe, Flash/Blink, variierende Logo-Rotation).
+
+### Verbessert
+
+- Resource-Monitor UI:
+	- Begriffe vereinheitlicht (`Ressourcenmonitor`, `Prozessor`, `Arbeitsspeicher-Auslastung`, `Verlauf`).
+	- Host-Metriken zentriert über den jeweiligen Trends ausgerichtet.
+	- VM-Darstellung priorisiert verbundene VMs und nutzt horizontales Scrolling für zusätzliche Karten.
+	- Fenstermaße und Abstände für 2-VM-Sichtbarkeit mehrfach feinjustiert.
+- Resource-Monitor Stabilität:
+	- Refresh-/Snapshot-Pfad fehlertoleranter gemacht, inklusive Fallback auf letzte gültige Daten.
+	- Rendering atomarisiert, um temporäre Leerzustände im Host-Bereich zu vermeiden.
+- Disco-Modus:
+	- 3 Intensitätsprofile (`Soft`, `Classic`, `Hardcore`) ergänzt.
+	- 20-Sekunden-Flow mit Auto-Reload beibehalten.
+	- Logo-Rotation im Disco-Modus variiert jetzt in Richtung, Winkel und Dauer.
+
+### Behoben
+
+- `disco.mp3` wurde im Runtime-Output nicht gefunden, weil MP3-Assets nicht kopiert wurden.
+- WinUI-Projekt kopiert jetzt zusätzlich `Assets/*.mp3` in den Output (`CopyToOutputDirectory=PreserveNewest`).
+- Pfadauflösung für Disco-Audio robuster gemacht (mehrere Laufzeit-Fallbackpfade).
+
+### Doku
+
+- README auf `v2.4.5` aktualisiert (Release-Stand, Build-Beispiele, aktuelle Highlights).
+
 ## v2.4.4
 
 ### Highlights
