@@ -9,10 +9,6 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 - Resource-Monitor VM-Ansicht priorisiert verbundene VMs und nutzt horizontales Scrolling für zusätzliche Karten.
 - Resource-Monitor ist bei Snapshot-/Refresh-Aussetzern robuster (letzte gültige Werte bleiben sichtbar, kein Leerzustand mehr).
 - Bezeichnungen im Monitor wurden vereinheitlicht (`Ressourcenmonitor`, `Prozessor`, `Arbeitsspeicher-Auslastung`, `Verlauf`).
-- Versteckter Button `Leistungsoptimierung` im Resource-Monitor startet den 20s-Disco-Flow im Haupttool mit anschließendem Reload.
-- Disco-Modus im Host wieder sichtbar ausgebaut (Overlay, Farbverläufe, Blink-/Flash-Effekte und variierende Logo-Drehungen).
-- Disco-Intensität in drei Stufen ergänzt (`Soft`, `Classic`, `Hardcore`) bei unverändertem 20s-Flow.
-- Asset-Paketierung erweitert: `Assets/*.mp3` wird in den Output kopiert (fix für `disco.mp3` im Disco-Modus).
 - USB-Konfigurationsmigration zeigt in Host und Guest eine sichtbare Einmal-Info (nicht nur Feed-Notification).
 
 ## Projekte
