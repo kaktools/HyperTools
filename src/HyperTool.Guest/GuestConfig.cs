@@ -72,6 +72,8 @@ internal sealed class GuestUsbSettings
     public List<string> AutoConnectDeviceKeys { get; set; } = [];
 
     public bool UsbConfigResetMigrationApplied { get; set; }
+
+    public bool UsbConfigResetMigrationInfoPending { get; set; }
 }
 
 internal sealed class GuestSharedFolderSettings
@@ -350,6 +352,7 @@ internal static class GuestConfigService
         {
             config.Usb.AutoConnectDeviceKeys = [];
             config.Usb.UsbConfigResetMigrationApplied = true;
+            config.Usb.UsbConfigResetMigrationInfoPending = true;
         }
 
         config.Usb.AutoConnectDeviceKeys = (config.Usb.AutoConnectDeviceKeys ?? [])

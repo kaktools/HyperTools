@@ -440,6 +440,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly Dictionary<string, DateTimeOffset> _usbMetadataBusAliasExpiresUtc = new(StringComparer.OrdinalIgnoreCase);
     private bool _usbHardwareIdentityMigrationCompleted;
     private bool _usbConfigResetMigrationApplied;
+    private bool _usbResetMigrationInfoShown;
     private readonly Dictionary<string, DateTimeOffset> _usbAttachedWithoutAckSinceUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _usbAttachedWithoutAckAttempts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _usbForceDetachFallbackBusIds = new(StringComparer.OrdinalIgnoreCase);
@@ -596,6 +597,7 @@ public partial class MainViewModel : ViewModelBase
             _usbConfigResetMigrationApplied = true;
             PersistUsbAutoShareConfig();
             AddNotification("USB-Konfiguration wurde für das neue Mapping einmalig zurückgesetzt. Bitte Auto-Share und Kommentare neu setzen.", "Info");
+            ShowUsbResetMigrationInfoOnce();
         }
 
         var removedLegacyUsbKeysOnLoad = PurgeLegacyUsbBusIdKeysInMemory();
@@ -5556,6 +5558,7 @@ public partial class MainViewModel : ViewModelBase
                     _usbConfigResetMigrationApplied = true;
                     PersistUsbAutoShareConfig();
                     AddNotification("USB-Konfiguration wurde für das neue Mapping einmalig zurückgesetzt. Bitte Auto-Share und Kommentare neu setzen.", "Info");
+                    ShowUsbResetMigrationInfoOnce();
                 }
 
                 var removedLegacyUsbKeysOnReload = PurgeLegacyUsbBusIdKeysInMemory();
@@ -5978,6 +5981,7 @@ public partial class MainViewModel : ViewModelBase
                 _usbConfigResetMigrationApplied = true;
                 PersistUsbAutoShareConfig();
                 AddNotification("USB-Konfiguration wurde für das neue Mapping einmalig zurückgesetzt. Bitte Auto-Share und Kommentare neu setzen.", "Info");
+                ShowUsbResetMigrationInfoOnce();
             }
 
             ApplyConfiguredSharedFolders(config.SharedFolders.HostDefinitions);
@@ -6011,6 +6015,26 @@ public partial class MainViewModel : ViewModelBase
     private void MarkConfigClean()
     {
         HasPendingConfigChanges = false;
+    }
+
+    private void ShowUsbResetMigrationInfoOnce()
+    {
+        if (_usbResetMigrationInfoShown)
+        {
+            return;
+        }
+
+        _usbResetMigrationInfoShown = true;
+        try
+        {
+            _uiInteropService.ShowInfoMessage(
+                "USB-Konfiguration zurückgesetzt",
+                "Die alte USB-Zuordnung wurde einmalig bereinigt. Bitte Auto-Share und Kommentare neu setzen.");
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "USB reset migration info popup could not be shown.");
+        }
     }
 
     private static string NormalizeUiTheme(string? theme)

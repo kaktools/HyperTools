@@ -31,6 +31,15 @@ public sealed class UiInteropService : IUiInteropService
         Windows.ApplicationModel.DataTransfer.Clipboard.Flush();
     }
 
+    public void ShowInfoMessage(string title, string message)
+    {
+        NativeMessageBox.Show(
+            message,
+            string.IsNullOrWhiteSpace(title) ? "HyperTool" : title.Trim(),
+            NativeMessageBoxButtons.Ok,
+            NativeMessageBoxIcon.Information);
+    }
+
     public string? PickFolderPath(string description)
     {
         var picker = new FolderPicker

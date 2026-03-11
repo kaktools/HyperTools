@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
+using System.Threading.Tasks;
 using Windows.Graphics;
 using Windows.UI;
 
@@ -18,21 +19,34 @@ namespace HyperTool.WinUI.Views;
 public sealed class ResourceMonitorWindow : Window
 {
     private readonly Func<ResourceMonitorSnapshot> _snapshotProvider;
+    private readonly Func<Task>? _performanceOptimizationAction;
     private readonly bool _isDarkMode;
     private readonly DispatcherQueueTimer _refreshTimer;
-    private readonly StackPanel _hostPanel = new() { Spacing = 10 };
-    private readonly Grid _vmGrid = new() { ColumnSpacing = 12, RowSpacing = 12 };
+    private readonly StackPanel _hostPanel = new() { Spacing = 8 };
+    private readonly Grid _vmGrid = new() { ColumnSpacing = 10, RowSpacing = 10 };
     private readonly TextBlock _summaryText = new() { Opacity = 0.78 };
-    private readonly double _vmCardWidth = 520;
+    private readonly Button _hostDiscoButton = new()
+    {
+        Content = "Leistungsoptimierung",
+        HorizontalAlignment = HorizontalAlignment.Right,
+        VerticalAlignment = VerticalAlignment.Center,
+        Padding = new Thickness(10, 4, 10, 4),
+        Opacity = 0.45,
+        MinWidth = 156
+    };
+    private const double VmCardMinWidth = 380;
+    private const double VmCardMaxWidth = 520;
+    private ResourceMonitorSnapshot? _lastGoodSnapshot;
 
-    public ResourceMonitorWindow(Func<ResourceMonitorSnapshot> snapshotProvider, string uiTheme)
+    public ResourceMonitorWindow(Func<ResourceMonitorSnapshot> snapshotProvider, string uiTheme, Func<Task>? performanceOptimizationAction = null)
     {
         _snapshotProvider = snapshotProvider;
+        _performanceOptimizationAction = performanceOptimizationAction;
         _isDarkMode = string.Equals(uiTheme, "Dark", StringComparison.OrdinalIgnoreCase);
 
-        Title = "HyperTool Resource Monitor";
+        Title = "HyperTool Ressourcenmonitor";
         DwmWindowHelper.ApplyRoundedCorners(this);
-        DwmWindowHelper.ResizeForCurrentDpi(this, 1128, 910);
+        DwmWindowHelper.ResizeForCurrentDpi(this, 1005, 810);
         TryApplyWindowIcon();
 
         Content = BuildLayout();
@@ -43,6 +57,8 @@ public sealed class ResourceMonitorWindow : Window
         _refreshTimer.Interval = TimeSpan.FromMilliseconds(1000);
         _refreshTimer.Tick += (_, _) => Refresh();
         _refreshTimer.Start();
+
+        _hostDiscoButton.Click += async (_, _) => await TriggerPerformanceOptimizationAsync();
 
         Closed += (_, _) => _refreshTimer.Stop();
         Refresh();
@@ -67,16 +83,17 @@ public sealed class ResourceMonitorWindow : Window
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
         var headCard = CreateCard(14);
+        headCard.MinHeight = 92;
         var headStack = new StackPanel { Spacing = 4 };
         headStack.Children.Add(new TextBlock
         {
-            Text = "Resource Monitor",
+            Text = "Ressourcenmonitor",
             FontSize = 24,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
         });
         headStack.Children.Add(new TextBlock
         {
-            Text = "Host- und Guest-Ressourcen in Echtzeit (CPU, RAM, Trend).",
+            Text = "Host- und Guest-Ressourcen in Echtzeit (Prozessor, Arbeitsspeicher, Verlauf).",
             Opacity = 0.82,
             TextWrapping = TextWrapping.Wrap
         });
@@ -85,6 +102,7 @@ public sealed class ResourceMonitorWindow : Window
         root.Children.Add(headCard);
 
         var hostCard = CreateCard();
+        hostCard.MinHeight = 258;
         hostCard.Child = _hostPanel;
         Grid.SetRow(hostCard, 1);
         root.Children.Add(hostCard);
@@ -97,6 +115,7 @@ public sealed class ResourceMonitorWindow : Window
         };
 
         var vmCard = CreateCard();
+        vmCard.MinHeight = 320;
         vmCard.Child = vmScroll;
         Grid.SetRow(vmCard, 2);
         root.Children.Add(vmCard);
@@ -119,85 +138,202 @@ public sealed class ResourceMonitorWindow : Window
 
     private void Refresh()
     {
-        var snapshot = _snapshotProvider();
+        ResourceMonitorSnapshot snapshot;
+        try
+        {
+            snapshot = _snapshotProvider() ?? _lastGoodSnapshot ?? new ResourceMonitorSnapshot();
+            _lastGoodSnapshot = snapshot;
+        }
+        catch
+        {
+            if (_lastGoodSnapshot is null)
+            {
+                return;
+            }
+
+            snapshot = _lastGoodSnapshot;
+        }
+
+        var vmSnapshots = (snapshot.VmSnapshots ?? Array.Empty<VmResourceMonitorSnapshot>())
+            .Where(item => item is not null)
+            .ToList();
+        var hostCpuHistory = (snapshot.HostCpuHistory ?? Array.Empty<double>()).ToArray();
+        var hostRamHistory = (snapshot.HostRamPressureHistory ?? Array.Empty<double>()).ToArray();
+
+        var hostCpuPercent = Math.Clamp(snapshot.HostCpuPercent, 0d, 100d);
+        var hostRamTotalGb = Math.Max(0d, snapshot.HostRamTotalGb);
+        var hostRamUsedGb = Math.Clamp(snapshot.HostRamUsedGb, 0d, hostRamTotalGb <= 0 ? double.MaxValue : hostRamTotalGb);
+        var hostRamPercent = hostRamTotalGb <= 0d ? 0d : Math.Clamp((hostRamUsedGb / hostRamTotalGb) * 100d, 0d, 100d);
+
         _refreshTimer.Interval = TimeSpan.FromMilliseconds(Math.Clamp(snapshot.IntervalMs, 500, 5000));
 
-        var vmConnected = snapshot.VmSnapshots.Count(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase));
-        _summaryText.Text = $"Intervall: {snapshot.IntervalMs} ms   |   Verbundene Guests: {vmConnected}/{snapshot.VmSnapshots.Count}";
+        var vmConnected = vmSnapshots.Count(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase));
+        var summaryText = $"Intervall: {snapshot.IntervalMs} ms   |   Verbundene Guests: {vmConnected}/{vmSnapshots.Count}";
 
-        _hostPanel.Children.Clear();
-        _hostPanel.Children.Add(new TextBlock
+        var hostElements = new List<UIElement>();
+        var hostHeaderRow = new Grid();
+        hostHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        hostHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var hostTitle = new TextBlock
         {
             Text = "Host Ressourcen",
             FontSize = 20,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
-        });
-        _hostPanel.Children.Add(new TextBlock
+        };
+        hostHeaderRow.Children.Add(hostTitle);
+
+        Grid.SetColumn(_hostDiscoButton, 1);
+        hostHeaderRow.Children.Add(_hostDiscoButton);
+        hostElements.Add(hostHeaderRow);
+
+        var hostKpiGrid = new Grid { ColumnSpacing = 12 };
+        hostKpiGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        hostKpiGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        hostKpiGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        hostKpiGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var cpuHeaderRow = new Grid
         {
-            Text = $"CPU {snapshot.HostCpuPercent:0.#}%   RAM {snapshot.HostRamUsedGb:0.0}/{snapshot.HostRamTotalGb:0.0} GB",
-            Opacity = 0.9
-        });
-        _hostPanel.Children.Add(new TextBlock
+            ColumnSpacing = 10,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            MinHeight = 60
+        };
+        cpuHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        cpuHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        cpuHeaderRow.Children.Add(new TextBlock
         {
-            Text = "RAM-Auslastung",
+            Text = "Prozessor",
+            FontSize = 18,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            Opacity = 0.9
-        });
-        _hostPanel.Children.Add(CreatePressureBar(snapshot.HostRamPressurePercent, width: 300));
-        _hostPanel.Children.Add(new TextBlock
-        {
-            Text = $"{Math.Clamp(snapshot.HostRamPressurePercent, 0d, 100d):0.#}%",
-            Opacity = 0.84,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+            Opacity = 0.9,
+            VerticalAlignment = VerticalAlignment.Center
         });
 
-        var hostCharts = new Grid { ColumnSpacing = 10 };
-        hostCharts.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        hostCharts.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        hostCharts.Children.Add(CreateChartCard("CPU Trend", snapshot.HostCpuHistory, 460, 96, Color.FromArgb(0xFF, 0x36, 0xC4, 0xFF)));
-        var ramChart = CreateChartCard("RAM Pressure", snapshot.HostRamPressureHistory, 460, 96, Color.FromArgb(0xFF, 0xFF, 0xB3, 0x3C));
+        var cpuPercentText = new TextBlock
+        {
+            Text = $"{hostCpuPercent:0.#}%",
+            FontSize = 30,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            LineHeight = 34,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(cpuPercentText, 1);
+        cpuHeaderRow.Children.Add(cpuPercentText);
+        hostKpiGrid.Children.Add(cpuHeaderRow);
+
+        var cpuChart = CreateChartCard("Prozessor-Verlauf", hostCpuHistory, 420, 96, Color.FromArgb(0xFF, 0x36, 0xC4, 0xFF));
+        Grid.SetRow(cpuChart, 1);
+        hostKpiGrid.Children.Add(cpuChart);
+
+        var ramHeaderPanel = new StackPanel
+        {
+            Spacing = 4,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            MinHeight = 60
+        };
+        ramHeaderPanel.Children.Add(new TextBlock
+        {
+            Text = "Arbeitsspeicher-Auslastung",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Opacity = 0.9,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextAlignment = TextAlignment.Center
+        });
+
+        var hostRamUsageRow = new Grid
+        {
+            ColumnSpacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        hostRamUsageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        hostRamUsageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var hostRamBar = (FrameworkElement)CreatePressureBar(hostRamPercent, width: 230);
+        Grid.SetColumn(hostRamBar, 0);
+        hostRamUsageRow.Children.Add(hostRamBar);
+
+        var hostRamText = new TextBlock
+        {
+            Text = $"{hostRamUsedGb:0.0}/{hostRamTotalGb:0.0} GB ({hostRamPercent:0.#}%)",
+            Opacity = 0.9,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(hostRamText, 1);
+        hostRamUsageRow.Children.Add(hostRamText);
+
+        ramHeaderPanel.Children.Add(hostRamUsageRow);
+        Grid.SetColumn(ramHeaderPanel, 1);
+        hostKpiGrid.Children.Add(ramHeaderPanel);
+
+        var ramChart = CreateChartCard("RAM-Auslastung", hostRamHistory, 420, 96, Color.FromArgb(0xFF, 0xFF, 0xB3, 0x3C));
+        Grid.SetRow(ramChart, 1);
         Grid.SetColumn(ramChart, 1);
-        hostCharts.Children.Add(ramChart);
-        _hostPanel.Children.Add(hostCharts);
+        hostKpiGrid.Children.Add(ramChart);
+        hostElements.Add(hostKpiGrid);
 
-        var vmTotalCpu = snapshot.VmSnapshots.Where(item => item.State == "Connected").Sum(item => item.CpuPercent);
-        var vmTotalRam = snapshot.VmSnapshots.Where(item => item.State == "Connected").Sum(item => item.RamUsedGb);
-        _hostPanel.Children.Add(new TextBlock
+        var vmTotalCpu = vmSnapshots.Where(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase)).Sum(item => item.CpuPercent);
+        var vmTotalRam = vmSnapshots.Where(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase)).Sum(item => item.RamUsedGb);
+        hostElements.Add(new TextBlock
         {
-            Text = $"Host vs Guest gesamt   CPU: Host {snapshot.HostCpuPercent:0.#}% / Guest {vmTotalCpu:0.#}%   RAM: Host {snapshot.HostRamUsedGb:0.0} GB / Guest {vmTotalRam:0.0} GB",
+            Text = $"Host vs Guest gesamt   Prozessor: Host {hostCpuPercent:0.#}% / Guest {vmTotalCpu:0.#}%   Arbeitsspeicher: Host {hostRamUsedGb:0.0} GB / Guest {vmTotalRam:0.0} GB",
             Opacity = 0.85
         });
+
+        var vms = vmSnapshots
+            .OrderByDescending(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(item => item.VmName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var vmCardWidth = ResolveVmCardWidthForTwoVisibleCards();
+        var vmCards = new List<FrameworkElement>(vms.Count);
+
+        for (var index = 0; index < vms.Count; index++)
+        {
+            var vmCard = CreateVmCard(vms[index]);
+            vmCard.Width = vmCardWidth;
+            vmCards.Add(vmCard);
+        }
+
+        _summaryText.Text = summaryText;
+
+        _hostPanel.Children.Clear();
+        foreach (var hostElement in hostElements)
+        {
+            _hostPanel.Children.Add(hostElement);
+        }
 
         _vmGrid.Children.Clear();
         _vmGrid.ColumnDefinitions.Clear();
         _vmGrid.RowDefinitions.Clear();
         _vmGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        var vms = snapshot.VmSnapshots.OrderBy(item => item.VmName, StringComparer.OrdinalIgnoreCase).ToList();
-        for (var index = 0; index < vms.Count; index++)
+        for (var index = 0; index < vmCards.Count; index++)
         {
-            _vmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(_vmCardWidth) });
-
-            var vmCard = CreateVmCard(vms[index]);
-            vmCard.Width = _vmCardWidth;
-            Grid.SetRow(vmCard, 0);
-            Grid.SetColumn(vmCard, index);
-            _vmGrid.Children.Add(vmCard);
+            _vmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(vmCardWidth) });
+            Grid.SetRow(vmCards[index], 0);
+            Grid.SetColumn(vmCards[index], index);
+            _vmGrid.Children.Add(vmCards[index]);
         }
     }
 
     private static FrameworkElement CreateVmCard(VmResourceMonitorSnapshot vm)
     {
-        var card = CreateCard();
+        var card = CreateCard(10);
         card.MinWidth = 320;
         card.HorizontalAlignment = HorizontalAlignment.Stretch;
 
-        var stack = new StackPanel { Spacing = 6 };
+        var stack = new StackPanel { Spacing = 4 };
         stack.Children.Add(new TextBlock
         {
             Text = vm.VmName,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            FontSize = 16
+            FontSize = 15
         });
 
         var stateBadge = new Border
@@ -213,7 +349,7 @@ public sealed class ResourceMonitorWindow : Window
         stateBadge.Child = new TextBlock
         {
             Text = stateText,
-            FontSize = 12,
+            FontSize = 11,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
         };
         stack.Children.Add(stateBadge);
@@ -231,11 +367,11 @@ public sealed class ResourceMonitorWindow : Window
         {
             stack.Children.Add(new TextBlock
             {
-                Text = $"CPU {vm.CpuPercent:0.#}%   RAM {vm.RamUsedGb:0.0}/{vm.RamTotalGb:0.0} GB"
+                Text = $"Prozessor {vm.CpuPercent:0.#}%   Arbeitsspeicher {vm.RamUsedGb:0.0}/{vm.RamTotalGb:0.0} GB"
             });
             stack.Children.Add(CreatePressureBar(vm.RamPressurePercent, width: 240));
-            stack.Children.Add(CreateChartCard("CPU Trend", vm.CpuHistory, 420, 72, Color.FromArgb(0xFF, 0x36, 0xC4, 0xFF)));
-            stack.Children.Add(CreateChartCard("RAM Pressure", vm.RamPressureHistory, 420, 72, Color.FromArgb(0xFF, 0xFF, 0xB3, 0x3C)));
+            stack.Children.Add(CreateChartCard("Prozessor-Verlauf", vm.CpuHistory ?? Array.Empty<double>(), 420, 66, Color.FromArgb(0xFF, 0x36, 0xC4, 0xFF)));
+            stack.Children.Add(CreateChartCard("RAM-Auslastung", vm.RamPressureHistory ?? Array.Empty<double>(), 420, 66, Color.FromArgb(0xFF, 0xFF, 0xB3, 0x3C)));
         }
 
         card.Child = stack;
@@ -371,6 +507,20 @@ public sealed class ResourceMonitorWindow : Window
         return grid;
     }
 
+    private double ResolveVmCardWidthForTwoVisibleCards()
+    {
+        var windowWidth = (Content as FrameworkElement)?.ActualWidth;
+        if (!windowWidth.HasValue || windowWidth.Value <= 0)
+        {
+            return 460;
+        }
+
+        const double outerPadding = 68;
+        var usableWidth = Math.Max(320d, windowWidth.Value - outerPadding);
+        var widthForTwoCards = (usableWidth - _vmGrid.ColumnSpacing) / 2d;
+        return Math.Clamp(widthForTwoCards, VmCardMinWidth, VmCardMaxWidth);
+    }
+
     private void ApplyRequestedTheme()
     {
         if (Content is FrameworkElement root)
@@ -446,6 +596,28 @@ public sealed class ResourceMonitorWindow : Window
         }
         catch
         {
+        }
+    }
+
+    private async Task TriggerPerformanceOptimizationAsync()
+    {
+        if (!_hostDiscoButton.IsEnabled)
+        {
+            return;
+        }
+
+        _hostDiscoButton.IsEnabled = false;
+        try
+        {
+            Close();
+            if (_performanceOptimizationAction is not null)
+            {
+                await _performanceOptimizationAction();
+            }
+        }
+        finally
+        {
+            _hostDiscoButton.IsEnabled = true;
         }
     }
 }

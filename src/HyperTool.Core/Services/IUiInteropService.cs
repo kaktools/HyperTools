@@ -11,6 +11,8 @@ public interface IUiInteropService
 {
     UnsavedConfigPromptResult ShowUnsavedConfigPrompt();
 
+    void ShowInfoMessage(string title, string message);
+
     void SetClipboardText(string text);
 
     string? PickFolderPath(string description);

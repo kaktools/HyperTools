@@ -45,6 +45,52 @@ public sealed class MainWindow : Window
     private const string GuestRuntimeRepo = "HyperTool";
     private const string GuestRuntimeAssetHint = "HyperTool-Guest-Setup";
     private const string GuestSingleInstancePipeName = "HyperTool.Guest.SingleInstance.Activate";
+    private enum PerformanceDiscoIntensity
+    {
+        Soft,
+        Classic,
+        Hardcore
+    }
+
+    private sealed record PerformanceDiscoProfile(
+        string Name,
+        int TimerIntervalMs,
+        double OverlayOpacityLow,
+        double OverlayOpacityHigh,
+        byte OverlayGradientStartAlpha,
+        byte OverlayGradientEndAlpha,
+        byte ButtonGradientStartAlpha,
+        byte ButtonGradientEndAlpha);
+
+    private static readonly PerformanceDiscoProfile SoftDiscoProfile = new(
+        "Soft",
+        260,
+        0.14,
+        0.26,
+        0x8E,
+        0x74,
+        0xB8,
+        0x90);
+
+    private static readonly PerformanceDiscoProfile ClassicDiscoProfile = new(
+        "Classic",
+        180,
+        0.18,
+        0.34,
+        0xAF,
+        0x92,
+        0xDA,
+        0xA8);
+
+    private static readonly PerformanceDiscoProfile HardcoreDiscoProfile = new(
+        "Hardcore",
+        110,
+        0.24,
+        0.46,
+        0xD0,
+        0xB4,
+        0xF0,
+        0xCC);
     private static readonly HttpClient RuntimeInstallerDownloadClient = new();
 
     private readonly IThemeService _themeService;
@@ -160,6 +206,14 @@ public sealed class MainWindow : Window
     private string _vmChipRefreshSignature = string.Empty;
     private bool _suppressHostFeatureToggleEvents;
     private bool _suppressUsbSelectionEvents;
+    private bool _isPerformanceDiscoRunning;
+    private PerformanceDiscoIntensity _performanceDiscoIntensity = PerformanceDiscoIntensity.Classic;
+    private readonly Random _performanceDiscoRandom = new();
+    private Border? _performanceDiscoOverlay;
+    private DispatcherQueueTimer? _performanceDiscoTimer;
+    private bool _performanceDiscoPulseHigh;
+    private readonly Dictionary<Button, (Brush? background, Brush? border, Brush? foreground)> _performanceDiscoButtonStyles = new();
+    private MediaPlayer? _performanceDiscoPlayer;
 
     public MainWindow(IThemeService themeService, MainViewModel viewModel, bool showStartupSplash = false)
     {
@@ -337,7 +391,22 @@ public sealed class MainWindow : Window
         _themeTransitionOverlay = BuildThemeTransitionOverlay();
         host.Children.Add(_themeTransitionOverlay);
 
+        _performanceDiscoOverlay = BuildPerformanceDiscoOverlay();
+        host.Children.Add(_performanceDiscoOverlay);
+
         return host;
+    }
+
+    private static Border BuildPerformanceDiscoOverlay()
+    {
+        return new Border
+        {
+            Visibility = Visibility.Collapsed,
+            Opacity = 0,
+            IsHitTestVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
     }
 
     private void SetWindowMainContent(UIElement content)
@@ -1533,7 +1602,7 @@ public sealed class MainWindow : Window
                 VerticalAlignment = VerticalAlignment.Center,
             }
         };
-        ToolTipService.SetToolTip(monitorButton, "Resource Monitor");
+        ToolTipService.SetToolTip(monitorButton, "Ressourcenmonitor");
         monitorButton.Click += (_, _) => OpenResourceMonitorWindow();
         titleActions.Children.Add(monitorButton);
 
@@ -4691,13 +4760,16 @@ public sealed class MainWindow : Window
                 return;
             }
 
-            _resourceMonitorWindow = new ResourceMonitorWindow(() => _viewModel.GetResourceMonitorSnapshot(), _viewModel.UiTheme);
+            _resourceMonitorWindow = new ResourceMonitorWindow(
+                () => _viewModel.GetResourceMonitorSnapshot(),
+                _viewModel.UiTheme,
+                TriggerResourceMonitorPerformanceOptimizationAsync);
             _resourceMonitorWindow.Closed += (_, _) => _resourceMonitorWindow = null;
             _resourceMonitorWindow.Activate();
         }
         catch (Exception ex)
         {
-            _viewModel.PublishNotification($"Resource Monitor konnte nicht geöffnet werden: {ex.Message}", "Error");
+            _viewModel.PublishNotification($"Ressourcenmonitor konnte nicht geöffnet werden: {ex.Message}", "Error");
             Log.Error(ex, "Failed to open resource monitor window.");
 
             try
@@ -4712,23 +4784,294 @@ public sealed class MainWindow : Window
         }
     }
 
-    private void RunLogoEasterEgg()
+    private async Task TriggerResourceMonitorPerformanceOptimizationAsync()
     {
-        _logoRotateTransform.Angle = 0;
+        if (_isPerformanceDiscoRunning)
+        {
+            return;
+        }
+
+        _isPerformanceDiscoRunning = true;
+        try
+        {
+            try
+            {
+                _resourceMonitorWindow?.Close();
+            }
+            catch
+            {
+            }
+
+            _resourceMonitorWindow = null;
+            var discoProfile = ResolveCurrentDiscoProfile();
+            _viewModel.PublishNotification("Leistungsoptimierung gestartet: Disco-Modus aktiv (20 Sekunden).", "Info");
+
+            StartPerformanceDiscoVisuals(discoProfile);
+
+            var endsAt = DateTimeOffset.UtcNow.AddSeconds(20);
+            while (DateTimeOffset.UtcNow < endsAt)
+            {
+                RunLogoEasterEgg(playSound: false, varied: true);
+                await Task.Delay(TimeSpan.FromMilliseconds(950));
+            }
+
+            StopPerformanceDiscoVisuals();
+
+            await _viewModel.ReloadConfigCommand.ExecuteAsync(null);
+            _viewModel.PublishNotification("Disco-Modus beendet. Tool wurde neu geladen.", "Success");
+        }
+        catch (Exception ex)
+        {
+            _viewModel.PublishNotification($"Leistungsoptimierung/Reload fehlgeschlagen: {ex.Message}", "Warning");
+            Log.Warning(ex, "Performance optimization disco mode failed.");
+        }
+        finally
+        {
+            StopPerformanceDiscoVisuals();
+            _performanceDiscoIntensity = GetNextDiscoIntensity(_performanceDiscoIntensity);
+            _isPerformanceDiscoRunning = false;
+        }
+    }
+
+    private void StartPerformanceDiscoVisuals(PerformanceDiscoProfile profile)
+    {
+        if (_windowHost is null)
+        {
+            return;
+        }
+
+        _performanceDiscoButtonStyles.Clear();
+        foreach (var button in EnumerateButtons(_windowHost))
+        {
+            _performanceDiscoButtonStyles[button] = (button.Background, button.BorderBrush, button.Foreground);
+        }
+
+        _performanceDiscoPulseHigh = false;
+        if (_performanceDiscoOverlay is not null)
+        {
+            _performanceDiscoOverlay.Visibility = Visibility.Visible;
+            _performanceDiscoOverlay.Opacity = profile.OverlayOpacityLow;
+        }
+
+        _performanceDiscoTimer ??= DispatcherQueue.CreateTimer();
+        _performanceDiscoTimer.Interval = TimeSpan.FromMilliseconds(profile.TimerIntervalMs);
+        _performanceDiscoTimer.Tick -= OnPerformanceDiscoTick;
+        _performanceDiscoTimer.Tick += OnPerformanceDiscoTick;
+        _performanceDiscoTimer.Start();
+
+        StartPerformanceDiscoAudio();
+        ApplyPerformanceDiscoFrame(profile);
+    }
+
+    private void StopPerformanceDiscoVisuals()
+    {
+        _performanceDiscoTimer?.Stop();
+
+        foreach (var entry in _performanceDiscoButtonStyles)
+        {
+            if (entry.Key is null)
+            {
+                continue;
+            }
+
+            entry.Key.Background = entry.Value.background;
+            entry.Key.BorderBrush = entry.Value.border;
+            entry.Key.Foreground = entry.Value.foreground;
+        }
+
+        _performanceDiscoButtonStyles.Clear();
+
+        if (_performanceDiscoOverlay is not null)
+        {
+            _performanceDiscoOverlay.Opacity = 0;
+            _performanceDiscoOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        StopPerformanceDiscoAudio();
+
+        ApplyRequestedTheme();
+        UpdateTitleBarAppearance();
+        UpdateNavSelection();
+    }
+
+    private void OnPerformanceDiscoTick(object? sender, object e)
+    {
+        ApplyPerformanceDiscoFrame(ResolveCurrentDiscoProfile());
+    }
+
+    private void ApplyPerformanceDiscoFrame(PerformanceDiscoProfile profile)
+    {
+        _performanceDiscoPulseHigh = !_performanceDiscoPulseHigh;
+
+        if (_performanceDiscoOverlay is not null)
+        {
+            _performanceDiscoOverlay.Background = CreateRandomGradientBrush(profile.OverlayGradientStartAlpha, profile.OverlayGradientEndAlpha);
+            _performanceDiscoOverlay.Opacity = _performanceDiscoPulseHigh ? profile.OverlayOpacityHigh : profile.OverlayOpacityLow;
+        }
+
+        foreach (var button in _performanceDiscoButtonStyles.Keys)
+        {
+            if (button is null)
+            {
+                continue;
+            }
+
+            button.Background = CreateRandomGradientBrush(profile.ButtonGradientStartAlpha, profile.ButtonGradientEndAlpha);
+            button.BorderBrush = new SolidColorBrush(CreateRandomDiscoColor(alpha: 0xFF));
+            button.Foreground = new SolidColorBrush(Color.FromArgb(0xF8, 0xFF, 0xFF, 0xFF));
+        }
+    }
+
+    private PerformanceDiscoProfile ResolveCurrentDiscoProfile()
+    {
+        return _performanceDiscoIntensity switch
+        {
+            PerformanceDiscoIntensity.Soft => SoftDiscoProfile,
+            PerformanceDiscoIntensity.Hardcore => HardcoreDiscoProfile,
+            _ => ClassicDiscoProfile
+        };
+    }
+
+    private static PerformanceDiscoIntensity GetNextDiscoIntensity(PerformanceDiscoIntensity current)
+    {
+        return current switch
+        {
+            PerformanceDiscoIntensity.Soft => PerformanceDiscoIntensity.Classic,
+            PerformanceDiscoIntensity.Classic => PerformanceDiscoIntensity.Hardcore,
+            _ => PerformanceDiscoIntensity.Soft
+        };
+    }
+
+    private void StartPerformanceDiscoAudio()
+    {
+        try
+        {
+            var discoPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "disco.mp3");
+            if (!File.Exists(discoPath))
+            {
+                return;
+            }
+
+            StopPerformanceDiscoAudio();
+
+            var player = new MediaPlayer
+            {
+                AudioCategory = MediaPlayerAudioCategory.SoundEffects,
+                Volume = 0.42,
+                IsLoopingEnabled = true,
+                Source = MediaSource.CreateFromUri(new Uri(discoPath))
+            };
+
+            _performanceDiscoPlayer = player;
+            player.Play();
+        }
+        catch
+        {
+        }
+    }
+
+    private void StopPerformanceDiscoAudio()
+    {
+        try
+        {
+            _performanceDiscoPlayer?.Pause();
+            _performanceDiscoPlayer?.Dispose();
+        }
+        catch
+        {
+        }
+        finally
+        {
+            _performanceDiscoPlayer = null;
+        }
+    }
+
+    private IEnumerable<Button> EnumerateButtons(DependencyObject root)
+    {
+        var queue = new Queue<DependencyObject>();
+        queue.Enqueue(root);
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (current is Button button)
+            {
+                yield return button;
+            }
+
+            var childCount = VisualTreeHelper.GetChildrenCount(current);
+            for (var i = 0; i < childCount; i++)
+            {
+                var child = VisualTreeHelper.GetChild(current, i);
+                if (child is not null)
+                {
+                    queue.Enqueue(child);
+                }
+            }
+        }
+    }
+
+    private LinearGradientBrush CreateRandomGradientBrush(byte alphaStart, byte alphaEnd)
+    {
+        return new LinearGradientBrush
+        {
+            StartPoint = new Windows.Foundation.Point(0, 0),
+            EndPoint = new Windows.Foundation.Point(1, 1),
+            GradientStops =
+            {
+                new GradientStop { Offset = 0.0, Color = CreateRandomDiscoColor(alphaStart) },
+                new GradientStop { Offset = 1.0, Color = CreateRandomDiscoColor(alphaEnd) }
+            }
+        };
+    }
+
+    private Color CreateRandomDiscoColor(byte alpha)
+    {
+        return Color.FromArgb(
+            alpha,
+            (byte)_performanceDiscoRandom.Next(35, 256),
+            (byte)_performanceDiscoRandom.Next(35, 256),
+            (byte)_performanceDiscoRandom.Next(35, 256));
+    }
+
+    private void RunLogoEasterEgg(bool playSound = true, bool varied = false)
+    {
+        if (!varied)
+        {
+            _logoRotateTransform.Angle = 0;
+        }
+
+        var fromAngle = _logoRotateTransform.Angle;
+        var turnDelta = varied
+            ? _performanceDiscoRandom.Next(220, 1320) * (_performanceDiscoRandom.Next(0, 2) == 0 ? -1 : 1)
+            : 720;
+        var durationMs = varied
+            ? _performanceDiscoRandom.Next(520, 1700)
+            : 1400;
 
         var storyboard = new Storyboard();
         var animation = new DoubleAnimation
         {
-            From = 0,
-            To = 720,
-            Duration = TimeSpan.FromMilliseconds(1400),
+            From = fromAngle,
+            To = fromAngle + turnDelta,
+            Duration = TimeSpan.FromMilliseconds(durationMs),
             EnableDependentAnimation = true
         };
+
+        if (varied)
+        {
+            animation.EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut };
+        }
 
         Storyboard.SetTarget(animation, _logoRotateTransform);
         Storyboard.SetTargetProperty(animation, nameof(RotateTransform.Angle));
         storyboard.Children.Add(animation);
         storyboard.Begin();
+
+        if (!playSound)
+        {
+            return;
+        }
 
         try
         {

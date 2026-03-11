@@ -271,6 +271,7 @@ internal sealed class GuestMainWindow : Window
     private bool _suppressUsbDisconnectOnExitToggleEvents;
     private bool _isHandlingMenuSwitch;
     private bool _isMenuSwitchPromptOpen;
+    private bool _usbResetMigrationInfoShown;
     private CancellationTokenSource? _usbTransportAutoRefreshCts;
     private MediaPlayer? _logoSpinPlayer;
     private List<UIElement>? _startupMainElements;
@@ -326,6 +327,8 @@ internal sealed class GuestMainWindow : Window
 
         GuestLogger.EntryWritten += OnLoggerEntryWritten;
         Closed += (_, _) => GuestLogger.EntryWritten -= OnLoggerEntryWritten;
+
+        DispatcherQueue.TryEnqueue(() => _ = ShowUsbResetMigrationInfoIfPendingAsync());
     }
 
     public string CurrentTheme => GuestConfigService.NormalizeTheme((_themeCombo.SelectedItem as string) ?? _config.Ui.Theme);
@@ -3600,6 +3603,45 @@ internal sealed class GuestMainWindow : Window
         };
 
         return await dialog.ShowAsync();
+    }
+
+    private async Task ShowUsbResetMigrationInfoIfPendingAsync()
+    {
+        if (_usbResetMigrationInfoShown || _config.Usb?.UsbConfigResetMigrationInfoPending != true)
+        {
+            return;
+        }
+
+        _usbResetMigrationInfoShown = true;
+
+        if (Content is not FrameworkElement root || root.XamlRoot is null)
+        {
+            _usbResetMigrationInfoShown = false;
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = root.XamlRoot,
+            Title = "USB-Konfiguration zurückgesetzt",
+            Content = "Nach einem USB-Migrations-Update wurden alte USB-Einträge einmalig entfernt. Bitte Auto-Connect für die gewünschten Geräte neu setzen.",
+            CloseButtonText = "OK",
+            DefaultButton = ContentDialogButton.Close
+        };
+
+        await dialog.ShowAsync();
+
+        _config.Usb.UsbConfigResetMigrationInfoPending = false;
+        try
+        {
+            await _saveConfigAsync(_config);
+            AppendNotification("[Info] Hinweis zur USB-Migration bestätigt.");
+        }
+        catch (Exception ex)
+        {
+            _config.Usb.UsbConfigResetMigrationInfoPending = true;
+            AppendNotification($"[Warn] USB-Migrations-Hinweis konnte nicht gespeichert werden: {ex.Message}");
+        }
     }
 
     private async Task ReloadConfigFromDiskAsync(string? successNotification = null)
