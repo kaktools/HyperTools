@@ -8,6 +8,8 @@ public sealed class UsbIpDeviceInfo
 
     public string HardwareId { get; set; } = string.Empty;
 
+    public string HardwareIdentityKey { get; set; } = string.Empty;
+
     public string InstanceId { get; set; } = string.Empty;
 
     public string PersistedGuid { get; set; } = string.Empty;
@@ -71,7 +73,6 @@ public sealed class UsbIpDeviceInfo
         get
         {
             var bus = string.IsNullOrWhiteSpace(BusId) ? "-" : BusId;
-            var hardware = string.IsNullOrWhiteSpace(HardwareId) ? "----:----" : HardwareId;
             var description = string.IsNullOrWhiteSpace(CustomName)
                 ? (string.IsNullOrWhiteSpace(Description) ? "USB Device" : Description)
                 : CustomName;
@@ -81,7 +82,7 @@ public sealed class UsbIpDeviceInfo
             var commentInfo = string.IsNullOrWhiteSpace(CustomComment)
                 ? string.Empty
                 : $"  ({CustomComment})";
-            return $"[{StateText}]  {bus}  {hardware}  {description}{commentInfo}{guestInfo}";
+            return $"{StateText} - {bus} - {description}{commentInfo}{guestInfo}";
         }
     }
 
@@ -90,11 +91,10 @@ public sealed class UsbIpDeviceInfo
         get
         {
             var bus = string.IsNullOrWhiteSpace(BusId) ? "-" : BusId;
-            var hardware = string.IsNullOrWhiteSpace(HardwareId) ? "----:----" : HardwareId;
             var description = string.IsNullOrWhiteSpace(CustomName)
                 ? (string.IsNullOrWhiteSpace(Description) ? "USB Device" : Description)
                 : CustomName;
-            return $"[{StateText}]  {bus}  {hardware}  {description}";
+            return $"{StateText} - {bus} - {description}";
         }
     }
 

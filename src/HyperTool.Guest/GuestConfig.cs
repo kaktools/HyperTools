@@ -70,6 +70,8 @@ internal sealed class GuestUsbSettings
     public string HyperVSocketServiceId { get; set; } = HyperTool.Services.HyperVSocketUsbTunnelDefaults.ServiceIdString;
 
     public List<string> AutoConnectDeviceKeys { get; set; } = [];
+
+    public bool UsbConfigResetMigrationApplied { get; set; }
 }
 
 internal sealed class GuestSharedFolderSettings
@@ -279,7 +281,12 @@ internal static class GuestConfigService
 
         var raw = File.ReadAllText(configPath);
         var loaded = JsonSerializer.Deserialize<GuestConfig>(raw, SerializerOptions) ?? new GuestConfig();
+        var resetMigrationWasApplied = loaded.Usb?.UsbConfigResetMigrationApplied == true;
         Normalize(loaded);
+        if (!resetMigrationWasApplied && loaded.Usb?.UsbConfigResetMigrationApplied == true)
+        {
+            Write(configPath, loaded);
+        }
         created = false;
         return loaded;
     }
@@ -338,11 +345,19 @@ internal static class GuestConfigService
         config.Usb.HyperVSocketServiceId = string.IsNullOrWhiteSpace(config.Usb.HyperVSocketServiceId)
             ? HyperTool.Services.HyperVSocketUsbTunnelDefaults.ServiceIdString
             : config.Usb.HyperVSocketServiceId.Trim();
+
+        if (!config.Usb.UsbConfigResetMigrationApplied)
+        {
+            config.Usb.AutoConnectDeviceKeys = [];
+            config.Usb.UsbConfigResetMigrationApplied = true;
+        }
+
         config.Usb.AutoConnectDeviceKeys = (config.Usb.AutoConnectDeviceKeys ?? [])
             .Where(static key => !string.IsNullOrWhiteSpace(key))
             .Select(static key => key.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+        NormalizeUsbAutoConnectDeviceKeys(config.Usb.AutoConnectDeviceKeys);
 
         config.SharedFolders ??= new GuestSharedFolderSettings();
         config.SharedFolders.BaseDriveLetter = NormalizeDriveLetter(config.SharedFolders.BaseDriveLetter);
@@ -517,5 +532,117 @@ internal static class GuestConfigService
     public static string NormalizeMappingMode(string? mode)
     {
         return "hypertool-file";
+    }
+
+    private static void NormalizeUsbAutoConnectDeviceKeys(List<string> keys)
+    {
+        if (keys is null || keys.Count == 0)
+        {
+            return;
+        }
+
+        // Legacy busid-specific keys break when the same dongle is replugged to a new port.
+        // Convert them to device base keys before applying the rest of normalization.
+        for (var index = 0; index < keys.Count; index++)
+        {
+            var normalized = (keys[index] ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                keys[index] = string.Empty;
+                continue;
+            }
+
+            if (normalized.Contains("|busid:", StringComparison.OrdinalIgnoreCase)
+                && TryGetSpecificBaseKey(normalized, out var baseKey)
+                && !string.IsNullOrWhiteSpace(baseKey))
+            {
+                keys[index] = baseKey;
+            }
+            else
+            {
+                keys[index] = normalized;
+            }
+        }
+
+        var dedupedKeys = keys
+            .Where(static key => !string.IsNullOrWhiteSpace(key))
+            .Select(static key => key.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        keys.Clear();
+        keys.AddRange(dedupedKeys);
+
+        var specificBaseKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in keys)
+        {
+            var normalized = (key ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                continue;
+            }
+
+            if (TryGetSpecificBaseKey(normalized, out var specificBaseKey))
+            {
+                specificBaseKeys.Add(specificBaseKey);
+            }
+        }
+
+        if (specificBaseKeys.Count == 0)
+        {
+            return;
+        }
+
+        keys.RemoveAll(key =>
+        {
+            var normalized = (key ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return true;
+            }
+
+            if (TryGetSpecificBaseKey(normalized, out _))
+            {
+                return false;
+            }
+
+            return specificBaseKeys.Contains(normalized);
+        });
+    }
+
+    private static bool TryGetSpecificBaseKey(string key, out string baseKey)
+    {
+        baseKey = string.Empty;
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return false;
+        }
+
+        const string busIdMarker = "|busid:";
+        const string metaMarker = "|meta:";
+
+        var busIdIndex = key.IndexOf(busIdMarker, StringComparison.OrdinalIgnoreCase);
+        var metaIndex = key.IndexOf(metaMarker, StringComparison.OrdinalIgnoreCase);
+        var markerIndex = -1;
+
+        if (busIdIndex >= 0 && metaIndex >= 0)
+        {
+            markerIndex = Math.Min(busIdIndex, metaIndex);
+        }
+        else if (busIdIndex >= 0)
+        {
+            markerIndex = busIdIndex;
+        }
+        else if (metaIndex >= 0)
+        {
+            markerIndex = metaIndex;
+        }
+
+        if (markerIndex <= 0)
+        {
+            return false;
+        }
+
+        baseKey = key[..markerIndex].Trim();
+        return !string.IsNullOrWhiteSpace(baseKey);
     }
 }

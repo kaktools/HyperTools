@@ -260,6 +260,7 @@ internal sealed class GuestMainWindow : Window
     private int _selectedMenuIndex;
     private GuestConfig _config;
     private IReadOnlyList<UsbIpDeviceInfo> _usbDevices = [];
+    private string _lastUsbSelectionKey = string.Empty;
     private bool _suppressThemeEvents;
     private bool _isThemeRestartInProgress;
     private bool _isThemeToggleHandlerAttached;
@@ -694,6 +695,10 @@ internal sealed class GuestMainWindow : Window
     {
         var selectedBeforeRefresh = GetSelectedUsbDevice();
         var selectedKeyBeforeRefresh = BuildUsbSelectionKey(selectedBeforeRefresh);
+        if (string.IsNullOrWhiteSpace(selectedKeyBeforeRefresh))
+        {
+            selectedKeyBeforeRefresh = _lastUsbSelectionKey;
+        }
 
         _usbDevices = devices;
 
@@ -705,6 +710,7 @@ internal sealed class GuestMainWindow : Window
                 "USB/IP-Client nicht installiert. USB-Funktionen sind deaktiviert."
             };
             _usbListView.SelectedIndex = -1;
+            _lastUsbSelectionKey = string.Empty;
             return;
         }
 
@@ -716,6 +722,7 @@ internal sealed class GuestMainWindow : Window
                 "Aktuell keine Geräte zum Connecten vorhanden."
             };
             _usbListView.SelectedIndex = -1;
+            _lastUsbSelectionKey = string.Empty;
             UpdateAutoConnectToggleFromSelection();
             return;
         }
@@ -731,10 +738,15 @@ internal sealed class GuestMainWindow : Window
                 ?.index ?? -1;
 
             _usbListView.SelectedIndex = restoredIndex;
+            if (restoredIndex >= 0)
+            {
+                _lastUsbSelectionKey = selectedKeyBeforeRefresh;
+            }
         }
         else if (_usbListView.SelectedIndex < 0 && devices.Count > 0)
         {
             _usbListView.SelectedIndex = 0;
+            _lastUsbSelectionKey = BuildUsbSelectionKey(GetSelectedUsbDevice());
         }
 
         UpdateAutoConnectToggleFromSelection();
@@ -762,9 +774,30 @@ internal sealed class GuestMainWindow : Window
             return "instance:" + device.InstanceId.Trim();
         }
 
+        if (!string.IsNullOrWhiteSpace(device.HardwareIdentityKey))
+        {
+            var hardwareKey = NormalizeUsbHardwareId(device.HardwareIdentityKey);
+            var selectionKey = "hardware:" + hardwareKey;
+            if (!IsPreciseUsbHardwareIdentity(hardwareKey)
+                && !string.IsNullOrWhiteSpace(device.BusId))
+            {
+                selectionKey += "|busid:" + device.BusId.Trim();
+            }
+
+            return selectionKey;
+        }
+
         if (!string.IsNullOrWhiteSpace(device.HardwareId))
         {
-            return "hardware:" + device.HardwareId.Trim();
+            var hardwareKey = NormalizeUsbHardwareId(device.HardwareId);
+            var selectionKey = "hardware:" + hardwareKey;
+            if (!IsPreciseUsbHardwareIdentity(hardwareKey)
+                && !string.IsNullOrWhiteSpace(device.BusId))
+            {
+                selectionKey += "|busid:" + device.BusId.Trim();
+            }
+
+            return selectionKey;
         }
 
         if (!string.IsNullOrWhiteSpace(device.Description))
@@ -1843,7 +1876,11 @@ internal sealed class GuestMainWindow : Window
 
         listBorder.Child = listLayout;
 
-        _usbListView.SelectionChanged += (_, _) => UpdateAutoConnectToggleFromSelection();
+        _usbListView.SelectionChanged += (_, _) =>
+        {
+            _lastUsbSelectionKey = BuildUsbSelectionKey(GetSelectedUsbDevice());
+            UpdateAutoConnectToggleFromSelection();
+        };
 
         Grid.SetRow(listBorder, 1);
         root.Children.Add(listBorder);
@@ -3983,9 +4020,25 @@ internal sealed class GuestMainWindow : Window
 
     private static string BuildAutoConnectKey(UsbIpDeviceInfo device)
     {
+        var specific = BuildAutoConnectSpecificKey(device);
+        if (!string.IsNullOrWhiteSpace(specific))
+        {
+            return specific;
+        }
+
+        return BuildAutoConnectBaseKey(device);
+    }
+
+    private static string BuildAutoConnectBaseKey(UsbIpDeviceInfo device)
+    {
         if (!string.IsNullOrWhiteSpace(device.DeviceIdentityKey))
         {
             return device.DeviceIdentityKey.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.HardwareIdentityKey))
+        {
+            return "hardware:" + NormalizeUsbHardwareId(device.HardwareIdentityKey);
         }
 
         if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
@@ -4000,7 +4053,7 @@ internal sealed class GuestMainWindow : Window
 
         if (!string.IsNullOrWhiteSpace(device.HardwareId))
         {
-            return "hardware:" + device.HardwareId.Trim();
+            return "hardware:" + NormalizeUsbHardwareId(device.HardwareId);
         }
 
         if (!string.IsNullOrWhiteSpace(device.Description))
@@ -4014,6 +4067,64 @@ internal sealed class GuestMainWindow : Window
         }
 
         return string.Empty;
+    }
+
+    private static bool IsAutoConnectKeyMatch(string configuredKey, string baseKey)
+    {
+        if (string.IsNullOrWhiteSpace(configuredKey) || string.IsNullOrWhiteSpace(baseKey))
+        {
+            return false;
+        }
+
+        if (string.Equals(configuredKey, baseKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var legacyMetaPrefix = baseKey + "|meta:";
+        return configuredKey.StartsWith(legacyMetaPrefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildAutoConnectSpecificKey(UsbIpDeviceInfo device)
+    {
+        var baseKey = BuildAutoConnectBaseKey(device);
+        if (string.IsNullOrWhiteSpace(baseKey))
+        {
+            return string.Empty;
+        }
+
+        var label = !string.IsNullOrWhiteSpace(device.CustomName)
+            ? device.CustomName
+            : device.CustomComment;
+
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return string.Empty;
+        }
+
+        return baseKey + "|meta:" + label.Trim().ToUpperInvariant();
+    }
+
+    private static string NormalizeUsbHardwareId(string? hardwareId)
+    {
+        if (string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return string.Empty;
+        }
+
+        var normalized = hardwareId.Trim().ToUpperInvariant();
+        if (normalized.StartsWith("USB\\", StringComparison.Ordinal))
+        {
+            normalized = normalized.Substring(4);
+        }
+
+        return normalized;
+    }
+
+    private static bool IsPreciseUsbHardwareIdentity(string hardwareIdentity)
+    {
+        return !string.IsNullOrWhiteSpace(hardwareIdentity)
+               && hardwareIdentity.Contains("&REV_", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task SetUsbDisconnectOnExitAsync(bool enabled)
@@ -4040,15 +4151,26 @@ internal sealed class GuestMainWindow : Window
     {
         var selected = GetSelectedUsbDevice();
         var keys = _config.Usb?.AutoConnectDeviceKeys ?? [];
-        var key = selected is null ? string.Empty : BuildAutoConnectKey(selected);
+        var baseKey = selected is null ? string.Empty : BuildAutoConnectBaseKey(selected);
+        var specificKey = selected is null ? string.Empty : BuildAutoConnectSpecificKey(selected);
+        var hasAmbiguousBaseKey = selected is not null
+            && !string.IsNullOrWhiteSpace(baseKey)
+            && _usbDevices.Count(candidate =>
+                !string.IsNullOrWhiteSpace(candidate.BusId)
+                && string.Equals(BuildAutoConnectBaseKey(candidate), baseKey, StringComparison.OrdinalIgnoreCase)) > 1;
+        var hasKey = selected is not null
+            && !string.IsNullOrWhiteSpace(baseKey)
+            && (
+                (!string.IsNullOrWhiteSpace(specificKey)
+                    && keys.Contains(specificKey, StringComparer.OrdinalIgnoreCase))
+                || (!hasAmbiguousBaseKey
+                    && keys.Any(configuredKey => IsAutoConnectKeyMatch(configuredKey, baseKey))));
 
         _suppressUsbAutoConnectToggleEvents = true;
         try
         {
             _usbAutoConnectCheckBox.IsEnabled = IsUsbFeatureUsable() && selected is not null;
-            _usbAutoConnectCheckBox.IsChecked = selected is not null
-                && !string.IsNullOrWhiteSpace(key)
-                && keys.Contains(key, StringComparer.OrdinalIgnoreCase);
+            _usbAutoConnectCheckBox.IsChecked = selected is not null && hasKey;
         }
         finally
         {
@@ -4080,6 +4202,15 @@ internal sealed class GuestMainWindow : Window
         _config.Usb ??= new GuestUsbSettings();
         var keys = _config.Usb.AutoConnectDeviceKeys ?? [];
         var changed = false;
+        var baseKey = BuildAutoConnectBaseKey(selected);
+        var specificKey = BuildAutoConnectSpecificKey(selected);
+        if (!string.IsNullOrWhiteSpace(specificKey))
+        {
+            key = specificKey;
+        }
+        var legacyMetaPrefix = string.IsNullOrWhiteSpace(baseKey) ? string.Empty : baseKey + "|meta:";
+        var usesSpecificKey = !string.IsNullOrWhiteSpace(specificKey)
+            && string.Equals(key, specificKey, StringComparison.OrdinalIgnoreCase);
 
         if (enabled)
         {
@@ -4088,10 +4219,26 @@ internal sealed class GuestMainWindow : Window
                 keys.Add(key);
                 changed = true;
             }
+
+            if (usesSpecificKey && !string.IsNullOrWhiteSpace(baseKey))
+            {
+                changed = keys.RemoveAll(existing =>
+                    string.Equals(existing, baseKey, StringComparison.OrdinalIgnoreCase)) > 0 || changed;
+            }
+
+            if (!string.IsNullOrWhiteSpace(legacyMetaPrefix))
+            {
+                changed = keys.RemoveAll(existing =>
+                    !string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)
+                    && existing.StartsWith(legacyMetaPrefix, StringComparison.OrdinalIgnoreCase)) > 0 || changed;
+            }
         }
         else
         {
-            changed = keys.RemoveAll(existing => string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)) > 0;
+            changed = keys.RemoveAll(existing =>
+                    string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)
+                    || (!string.IsNullOrWhiteSpace(legacyMetaPrefix)
+                        && existing.StartsWith(legacyMetaPrefix, StringComparison.OrdinalIgnoreCase))) > 0;
         }
 
         if (!changed)

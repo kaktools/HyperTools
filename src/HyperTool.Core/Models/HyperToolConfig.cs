@@ -89,6 +89,8 @@ public sealed class UsbSettings
     public List<UsbDeviceMetadataEntry> DeviceMetadata { get; set; } = [];
 
     public bool HardwareIdentityMigrationCompleted { get; set; }
+
+    public bool UsbConfigResetMigrationApplied { get; set; }
 }
 
 public sealed class SharedFolderSettings

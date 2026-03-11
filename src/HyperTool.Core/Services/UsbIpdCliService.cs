@@ -1,6 +1,7 @@
 using HyperTool.Models;
 using Microsoft.Win32;
 using Serilog;
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Pipes;
@@ -14,6 +15,10 @@ namespace HyperTool.Services;
 public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 {
     private static readonly Regex HardwareIdRegex = new("VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})", RegexOptions.Compiled);
+    private static readonly Regex HardwareIdWithRevisionRegex = new(@"(?:USB\\)?VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}&REV_[0-9A-Fa-f]{4}", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly ConcurrentDictionary<string, string> HardwareIdentityByInstanceIdCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentQueue<string> HardwareIdentityByInstanceIdCacheInsertionOrder = new();
+    private const int HardwareIdentityByInstanceIdCacheMaxEntries = 1000;
     private static readonly Regex ServiceStateRegex = new(@"STATE\s*:\s*(\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex RemoteUsbListRegex = new(@"^\s*([0-9]+-[0-9]+(?:\.[0-9]+)*)\s*:\s*(.+?)\s*\(([0-9A-Fa-f]{4}:[0-9A-Fa-f]{4})\)\s*$", RegexOptions.Compiled);
     private static readonly Regex UsbipPortHeaderRegex = new(@"^\s*Port\s+(\d+):", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -587,12 +592,17 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         {
             var instanceId = GetString(deviceElement, "InstanceId");
             var hardwareId = TryExtractHardwareId(instanceId);
+            var hardwareIdentityKeyFromPayload = TryExtractHardwareIdentityKeyFromPayload(deviceElement);
+            var hardwareIdentityKey = string.IsNullOrWhiteSpace(hardwareIdentityKeyFromPayload)
+                ? TryExtractHardwareIdentityKey(instanceId, hardwareId)
+                : hardwareIdentityKeyFromPayload;
 
             devices.Add(new UsbIpDeviceInfo
             {
                 BusId = GetString(deviceElement, "BusId"),
                 Description = GetString(deviceElement, "Description"),
                 HardwareId = hardwareId,
+                HardwareIdentityKey = hardwareIdentityKey,
                 InstanceId = instanceId,
                 PersistedGuid = GetString(deviceElement, "PersistedGuid"),
                 ClientIpAddress = GetString(deviceElement, "ClientIPAddress")
@@ -639,6 +649,243 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         return $"{match.Groups[1].Value}:{match.Groups[2].Value}".ToUpperInvariant();
     }
 
+    private static string TryExtractHardwareIdentityKey(string instanceId, string fallbackHardwareId)
+    {
+        if (string.IsNullOrWhiteSpace(instanceId))
+        {
+            return fallbackHardwareId;
+        }
+
+        if (HardwareIdentityByInstanceIdCache.TryGetValue(instanceId, out var cached))
+        {
+            var refreshed = TryResolveHardwareIdentityKeyFromRegistry(instanceId);
+            if (!string.IsNullOrWhiteSpace(refreshed))
+            {
+                if (!string.Equals(refreshed, cached, StringComparison.OrdinalIgnoreCase))
+                {
+                    HardwareIdentityByInstanceIdCache[instanceId] = refreshed;
+                    return refreshed;
+                }
+
+                return cached;
+            }
+
+            if (!DidHardwareIdentityFamilyChange(cached, fallbackHardwareId))
+            {
+                return cached;
+            }
+
+            HardwareIdentityByInstanceIdCache.TryRemove(instanceId, out _);
+        }
+
+        var resolved = TryResolveHardwareIdentityKeyFromRegistry(instanceId);
+        if (string.IsNullOrWhiteSpace(resolved))
+        {
+            resolved = fallbackHardwareId;
+        }
+
+        RememberHardwareIdentityCacheEntry(instanceId, resolved);
+        return resolved;
+    }
+
+    private static bool DidHardwareIdentityFamilyChange(string? cachedIdentity, string? fallbackHardwareId)
+    {
+        var cachedVidPid = TryExtractVidPid(cachedIdentity);
+        var fallbackVidPid = TryExtractVidPid(fallbackHardwareId);
+
+        if (string.IsNullOrWhiteSpace(cachedVidPid) || string.IsNullOrWhiteSpace(fallbackVidPid))
+        {
+            return false;
+        }
+
+        return !string.Equals(cachedVidPid, fallbackVidPid, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string TryExtractVidPid(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = value.Trim();
+        if (normalized.Length >= 9 && normalized[4] == ':')
+        {
+            var left = normalized[..4];
+            var right = normalized.Substring(5, Math.Min(4, normalized.Length - 5));
+            if (left.All(Uri.IsHexDigit) && right.Length == 4 && right.All(Uri.IsHexDigit))
+            {
+                return (left + ":" + right).ToUpperInvariant();
+            }
+        }
+
+        var match = HardwareIdRegex.Match(normalized);
+        if (!match.Success)
+        {
+            return string.Empty;
+        }
+
+        return $"{match.Groups[1].Value}:{match.Groups[2].Value}".ToUpperInvariant();
+    }
+
+    private static void RememberHardwareIdentityCacheEntry(string instanceId, string resolvedIdentity)
+    {
+        if (string.IsNullOrWhiteSpace(instanceId))
+        {
+            return;
+        }
+
+        if (HardwareIdentityByInstanceIdCache.TryAdd(instanceId, resolvedIdentity))
+        {
+            HardwareIdentityByInstanceIdCacheInsertionOrder.Enqueue(instanceId);
+        }
+        else
+        {
+            HardwareIdentityByInstanceIdCache[instanceId] = resolvedIdentity;
+            return;
+        }
+
+        while (HardwareIdentityByInstanceIdCache.Count > HardwareIdentityByInstanceIdCacheMaxEntries
+               && HardwareIdentityByInstanceIdCacheInsertionOrder.TryDequeue(out var staleKey))
+        {
+            HardwareIdentityByInstanceIdCache.TryRemove(staleKey, out _);
+        }
+    }
+
+    private static string TryExtractHardwareIdentityKeyFromPayload(JsonElement deviceElement)
+    {
+        var propertyCandidates = new[]
+        {
+            "HardwareID",
+            "HardwareId",
+            "HardwareIDs",
+            "HardwareIds",
+            "CompatibleIDs",
+            "CompatibleIds"
+        };
+
+        foreach (var propertyName in propertyCandidates)
+        {
+            if (!deviceElement.TryGetProperty(propertyName, out var propertyElement))
+            {
+                continue;
+            }
+
+            var match = TryExtractPreciseHardwareIdFromElement(propertyElement);
+            if (!string.IsNullOrWhiteSpace(match))
+            {
+                return match;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string TryExtractPreciseHardwareIdFromElement(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.String:
+            {
+                var value = element.GetString();
+                return TryExtractPreciseHardwareIdFromCandidate(value);
+            }
+            case JsonValueKind.Array:
+            {
+                foreach (var item in element.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.String)
+                    {
+                        continue;
+                    }
+
+                    var value = item.GetString();
+                    var match = TryExtractPreciseHardwareIdFromCandidate(value);
+                    if (!string.IsNullOrWhiteSpace(match))
+                    {
+                        return match;
+                    }
+                }
+
+                break;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string TryExtractPreciseHardwareIdFromCandidate(string? candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return string.Empty;
+        }
+
+        var match = HardwareIdWithRevisionRegex.Match(candidate.Trim());
+        return match.Success
+            ? match.Value.Trim().ToUpperInvariant()
+            : string.Empty;
+    }
+
+    private static string TryResolveHardwareIdentityKeyFromRegistry(string instanceId)
+    {
+        try
+        {
+            var normalizedInstanceId = instanceId.Trim();
+            var registryPath = @"SYSTEM\CurrentControlSet\Enum\" + normalizedInstanceId;
+            using var key = Registry.LocalMachine.OpenSubKey(registryPath, writable: false)
+                ?? Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\" + normalizedInstanceId.Replace('#', '\\'), writable: false);
+            if (key is null)
+            {
+                return string.Empty;
+            }
+
+            foreach (var candidate in ReadHardwareIdCandidatesFromRegistryKey(key))
+            {
+                var match = TryExtractPreciseHardwareIdFromCandidate(candidate);
+                if (!string.IsNullOrWhiteSpace(match))
+                {
+                    return match;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return string.Empty;
+    }
+
+    private static IEnumerable<string> ReadHardwareIdCandidatesFromRegistryKey(RegistryKey key)
+    {
+        if (key.GetValue("HardwareID") is string[] hardwareIds)
+        {
+            foreach (var candidate in hardwareIds)
+            {
+                if (!string.IsNullOrWhiteSpace(candidate))
+                {
+                    yield return candidate;
+                }
+            }
+        }
+
+        if (key.GetValue("HardwareID") is string hardwareId && !string.IsNullOrWhiteSpace(hardwareId))
+        {
+            yield return hardwareId;
+        }
+
+        if (key.GetValue("CompatibleIDs") is string[] compatibleIds)
+        {
+            foreach (var candidate in compatibleIds)
+            {
+                if (!string.IsNullOrWhiteSpace(candidate))
+                {
+                    yield return candidate;
+                }
+            }
+        }
+    }
+
     private static IReadOnlyList<UsbIpDeviceInfo> ParseRemoteUsbList(string output)
     {
         if (string.IsNullOrWhiteSpace(output))
@@ -665,6 +912,7 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
                 BusId = busId,
                 Description = description,
                 HardwareId = hardwareId,
+                HardwareIdentityKey = hardwareId,
                 InstanceId = string.Empty,
                 PersistedGuid = string.Empty,
                 ClientIpAddress = string.Empty

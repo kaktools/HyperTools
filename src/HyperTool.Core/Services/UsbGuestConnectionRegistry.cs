@@ -11,6 +11,7 @@ public static class UsbGuestConnectionRegistry
     }
 
     private static readonly ConcurrentDictionary<string, GuestConnectionEntry> ConnectedGuestsByDeviceKey = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, GuestConnectionEntry> ConnectedGuestsByBusId = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, string> DeviceKeyByBusId = new(StringComparer.OrdinalIgnoreCase);
 
     public static void UpdateFromDiagnosticsAck(HyperVSocketDiagnosticsAck ack)
@@ -32,16 +33,15 @@ public static class UsbGuestConnectionRegistry
 
         if (string.Equals(eventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
         {
-            if (!string.IsNullOrWhiteSpace(deviceKey))
+            if (!string.IsNullOrWhiteSpace(busId))
             {
-                ConnectedGuestsByDeviceKey.TryRemove(deviceKey, out _);
+                ConnectedGuestsByBusId.TryRemove(busId, out _);
+                DeviceKeyByBusId.TryRemove(busId, out _);
             }
 
-            if (!string.IsNullOrWhiteSpace(busId)
-                && DeviceKeyByBusId.TryRemove(busId, out var mappedKey)
-                && !string.IsNullOrWhiteSpace(mappedKey))
+            if (!string.IsNullOrWhiteSpace(deviceKey) && string.IsNullOrWhiteSpace(busId))
             {
-                ConnectedGuestsByDeviceKey.TryRemove(mappedKey, out _);
+                ConnectedGuestsByDeviceKey.TryRemove(deviceKey, out _);
             }
 
             return;
@@ -52,15 +52,18 @@ public static class UsbGuestConnectionRegistry
             && !string.IsNullOrWhiteSpace(guestComputerName)
             && !string.IsNullOrWhiteSpace(deviceKey))
         {
-            ConnectedGuestsByDeviceKey[deviceKey] = new GuestConnectionEntry
+            var entry = new GuestConnectionEntry
             {
                 GuestComputerName = guestComputerName,
                 LastSeenUtc = DateTimeOffset.UtcNow
             };
 
+            ConnectedGuestsByDeviceKey[deviceKey] = entry;
+
             if (!string.IsNullOrWhiteSpace(busId))
             {
                 DeviceKeyByBusId[busId] = deviceKey;
+                ConnectedGuestsByBusId[busId] = entry;
             }
         }
     }
@@ -75,6 +78,12 @@ public static class UsbGuestConnectionRegistry
         }
 
         var normalizedBusId = busId.Trim();
+
+        if (ConnectedGuestsByBusId.TryGetValue(normalizedBusId, out var busEntry))
+        {
+            guestComputerName = busEntry.GuestComputerName;
+            return true;
+        }
 
         if (!DeviceKeyByBusId.TryGetValue(normalizedBusId, out var deviceKey)
             || string.IsNullOrWhiteSpace(deviceKey))
@@ -101,6 +110,17 @@ public static class UsbGuestConnectionRegistry
         }
 
         var normalizedBusId = busId.Trim();
+
+        if (ConnectedGuestsByBusId.TryGetValue(normalizedBusId, out var busEntry))
+        {
+            if ((DateTimeOffset.UtcNow - busEntry.LastSeenUtc) > maxAge)
+            {
+                return false;
+            }
+
+            guestComputerName = busEntry.GuestComputerName;
+            return true;
+        }
 
         if (!DeviceKeyByBusId.TryGetValue(normalizedBusId, out var deviceKey)
             || string.IsNullOrWhiteSpace(deviceKey))

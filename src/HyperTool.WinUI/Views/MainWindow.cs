@@ -3253,8 +3253,70 @@ public sealed class MainWindow : Window
 
         commentBox.KeyDown -= OnUsbInlineCommentBoxKeyDown;
         commentBox.KeyDown += OnUsbInlineCommentBoxKeyDown;
+        commentBox.GotFocus -= OnUsbInlineCommentBoxGotFocus;
+        commentBox.GotFocus += OnUsbInlineCommentBoxGotFocus;
         commentBox.LostFocus -= OnUsbInlineCommentBoxLostFocus;
         commentBox.LostFocus += OnUsbInlineCommentBoxLostFocus;
+    }
+
+    private sealed class UsbCommentEditSession
+    {
+        public string DeviceKey { get; set; } = string.Empty;
+
+        public string OriginalComment { get; set; } = string.Empty;
+
+        public bool HasUserInput { get; set; }
+    }
+
+    private static string BuildUsbCommentEditKey(UsbIpDeviceInfo device)
+    {
+        if (!string.IsNullOrWhiteSpace(device.DeviceIdentityKey))
+        {
+            return device.DeviceIdentityKey.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.HardwareIdentityKey))
+        {
+            return "hardware:" + device.HardwareIdentityKey.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.HardwareId))
+        {
+            return "hardware:" + device.HardwareId.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
+        {
+            return "guid:" + device.PersistedGuid.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.InstanceId))
+        {
+            return "instance:" + device.InstanceId.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.BusId))
+        {
+            return "busid:" + device.BusId.Trim();
+        }
+
+        return (device.Description ?? string.Empty).Trim();
+    }
+
+    private void OnUsbInlineCommentBoxGotFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is not TextBox commentBox
+            || commentBox.DataContext is not UsbIpDeviceInfo device)
+        {
+            return;
+        }
+
+        commentBox.Tag = new UsbCommentEditSession
+        {
+            DeviceKey = BuildUsbCommentEditKey(device),
+            OriginalComment = (device.CustomComment ?? string.Empty),
+            HasUserInput = false
+        };
     }
 
     private void OnUsbInlineCommentBoxKeyDown(object sender, KeyRoutedEventArgs e)
@@ -3264,11 +3326,31 @@ public sealed class MainWindow : Window
             return;
         }
 
+        if (commentBox.Tag is UsbCommentEditSession editSession
+            && IsUsbCommentEditingKey(e.Key))
+        {
+            editSession.HasUserInput = true;
+        }
+
         if (e.Key is Windows.System.VirtualKey.Enter)
         {
             SaveUsbInlineComment(commentBox);
             e.Handled = true;
         }
+    }
+
+    private static bool IsUsbCommentEditingKey(Windows.System.VirtualKey key)
+    {
+        if (key is Windows.System.VirtualKey.Back
+            or Windows.System.VirtualKey.Delete
+            or Windows.System.VirtualKey.Space)
+        {
+            return true;
+        }
+
+        return (key >= Windows.System.VirtualKey.Number0 && key <= Windows.System.VirtualKey.Number9)
+               || (key >= Windows.System.VirtualKey.NumberPad0 && key <= Windows.System.VirtualKey.NumberPad9)
+               || (key >= Windows.System.VirtualKey.A && key <= Windows.System.VirtualKey.Z);
     }
 
     private void OnUsbInlineCommentBoxLostFocus(object sender, RoutedEventArgs e)
@@ -3286,11 +3368,38 @@ public sealed class MainWindow : Window
             return;
         }
 
+        var editSession = commentBox.Tag as UsbCommentEditSession;
+        if (editSession is null)
+        {
+            return;
+        }
+
+        var currentDeviceKey = BuildUsbCommentEditKey(device);
+        if (!string.Equals(editSession.DeviceKey, currentDeviceKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (!editSession.HasUserInput)
+        {
+            return;
+        }
+
         var customComment = commentBox.Text ?? device.CustomComment;
+        if (string.Equals(customComment, editSession.OriginalComment, StringComparison.Ordinal))
+        {
+            return;
+        }
 
         if (_viewModel.TryUpdateUsbMetadata(device, device.CustomName, customComment, out _))
         {
             _viewModel.SelectedUsbDevice = device;
+            commentBox.Tag = new UsbCommentEditSession
+            {
+                DeviceKey = currentDeviceKey,
+                OriginalComment = customComment,
+                HasUserInput = false
+            };
         }
     }
 

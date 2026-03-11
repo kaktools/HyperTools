@@ -25,6 +25,7 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan StaleUsbAttachGracePeriod = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private static readonly TimeSpan MonitorAgentTimeout = TimeSpan.FromSeconds(5);
 
@@ -435,7 +436,10 @@ public partial class MainViewModel : ViewModelBase
     private readonly SemaphoreSlim _usbTrayRefreshGate = new(1, 1);
     private readonly HashSet<string> _usbAutoShareDeviceKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbDeviceMetadataByKey = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbMetadataBusAliasByKey = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _usbMetadataBusAliasExpiresUtc = new(StringComparer.OrdinalIgnoreCase);
     private bool _usbHardwareIdentityMigrationCompleted;
+    private bool _usbConfigResetMigrationApplied;
     private readonly Dictionary<string, DateTimeOffset> _usbAttachedWithoutAckSinceUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _usbAttachedWithoutAckAttempts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _usbForceDetachFallbackBusIds = new(StringComparer.OrdinalIgnoreCase);
@@ -550,7 +554,10 @@ public partial class MainViewModel : ViewModelBase
             }
         }
         _usbHardwareIdentityMigrationCompleted = configResult.Config.Usb.HardwareIdentityMigrationCompleted;
+        _usbConfigResetMigrationApplied = configResult.Config.Usb.UsbConfigResetMigrationApplied;
         _usbDeviceMetadataByKey.Clear();
+        _usbMetadataBusAliasByKey.Clear();
+        _usbMetadataBusAliasExpiresUtc.Clear();
         foreach (var metadata in configResult.Config.Usb.DeviceMetadata)
         {
             if (metadata is null)
@@ -578,7 +585,28 @@ public partial class MainViewModel : ViewModelBase
                 Comment = comment
             };
         }
+
+        if (!_usbConfigResetMigrationApplied)
+        {
+            _usbAutoShareDeviceKeys.Clear();
+            _usbDeviceMetadataByKey.Clear();
+            _usbMetadataBusAliasByKey.Clear();
+            _usbMetadataBusAliasExpiresUtc.Clear();
+            _usbHardwareIdentityMigrationCompleted = true;
+            _usbConfigResetMigrationApplied = true;
+            PersistUsbAutoShareConfig();
+            AddNotification("USB-Konfiguration wurde für das neue Mapping einmalig zurückgesetzt. Bitte Auto-Share und Kommentare neu setzen.", "Info");
+        }
+
+        var removedLegacyUsbKeysOnLoad = PurgeLegacyUsbBusIdKeysInMemory();
         ApplyConfiguredSharedFolders(configResult.Config.SharedFolders.HostDefinitions);
+
+        if (removedLegacyUsbKeysOnLoad)
+        {
+            PersistUsbAutoShareConfig();
+            AddNotification("Alte USB-BUSID-Einträge wurden bereinigt, um falsche Zuordnungen zu vermeiden.", "Info");
+        }
+
         ApplyConfiguredVmDefinitions(configResult.Config.Vms);
         _trayVmNames = NormalizeTrayVmNames(configResult.Config.Ui.TrayVmNames);
         AppVersion = ResolveAppVersion();
@@ -1078,10 +1106,36 @@ public partial class MainViewModel : ViewModelBase
         if (value)
         {
             changed = _usbAutoShareDeviceKeys.Add(key);
+
+            foreach (var aliasKey in BuildUsbIdentityAliasKeys(SelectedUsbDevice)
+                         .Where(aliasKey => !string.IsNullOrWhiteSpace(aliasKey)
+                                            && !string.Equals(aliasKey, key, StringComparison.OrdinalIgnoreCase))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                // Remove stale alternate keys (especially broad hardware keys)
+                // when a more stable key is now available.
+                changed = _usbAutoShareDeviceKeys.Remove(aliasKey) || changed;
+            }
+
+            foreach (var legacyKey in BuildUsbLegacyAutoShareKeys(SelectedUsbDevice)
+                         .Where(legacyKey => !string.IsNullOrWhiteSpace(legacyKey)
+                                             && !string.Equals(legacyKey, key, StringComparison.OrdinalIgnoreCase))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                changed = _usbAutoShareDeviceKeys.Remove(legacyKey) || changed;
+            }
         }
         else
         {
             changed = _usbAutoShareDeviceKeys.Remove(key);
+
+            foreach (var aliasKey in BuildUsbIdentityAliasKeys(SelectedUsbDevice)
+                         .Where(aliasKey => !string.IsNullOrWhiteSpace(aliasKey))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                changed = _usbAutoShareDeviceKeys.Remove(aliasKey) || changed;
+            }
+
             foreach (var legacyKey in BuildUsbLegacyAutoShareKeys(SelectedUsbDevice))
             {
                 changed = _usbAutoShareDeviceKeys.Remove(legacyKey) || changed;
@@ -1765,9 +1819,11 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        var previouslySelectedSelectionKey = SelectedUsbDevice is null
-            ? string.Empty
-            : BuildUsbSelectionKey(SelectedUsbDevice);
+        var hadPreviousSelection = SelectedUsbDevice is not null;
+        var previouslySelectedSelectionKey = hadPreviousSelection
+            ? BuildUsbSelectionKey(SelectedUsbDevice!)
+            : string.Empty;
+        var previousUsbSnapshot = UsbDevices.ToList();
         UsbStatusText = "USB-Geräte werden geladen...";
 
         async Task loadAction(CancellationToken token)
@@ -1834,6 +1890,8 @@ public partial class MainViewModel : ViewModelBase
                     _usbAttachedWithoutAckSinceUtc.Clear();
                     _usbAttachedWithoutAckAttempts.Clear();
                 }
+
+                await TryUnshareRemovedHostDevicesAsync(previousUsbSnapshot, devices, token);
             }
             catch (Exception ex)
             {
@@ -1881,10 +1939,13 @@ public partial class MainViewModel : ViewModelBase
                 }
             }
 
-            SelectedUsbDevice = UsbDevices.FirstOrDefault(device =>
-                                    !string.IsNullOrWhiteSpace(previouslySelectedSelectionKey)
-                                    && string.Equals(BuildUsbSelectionKey(device), previouslySelectedSelectionKey, StringComparison.OrdinalIgnoreCase))
-                                ?? UsbDevices.FirstOrDefault();
+            var restoredSelection = UsbDevices.FirstOrDefault(device =>
+                !string.IsNullOrWhiteSpace(previouslySelectedSelectionKey)
+                && string.Equals(BuildUsbSelectionKey(device), previouslySelectedSelectionKey, StringComparison.OrdinalIgnoreCase));
+
+            SelectedUsbDevice = hadPreviousSelection
+                ? restoredSelection
+                : UsbDevices.FirstOrDefault();
 
             UsbStatusText = UsbDevices.Count == 0
                 ? "Keine USB-Geräte gefunden."
@@ -1909,6 +1970,101 @@ public partial class MainViewModel : ViewModelBase
         {
             await loadAction(_lifetimeCancellation.Token);
         }
+    }
+
+    private async Task<int> TryUnshareRemovedHostDevicesAsync(
+        IReadOnlyList<UsbIpDeviceInfo> previousDevices,
+        IReadOnlyList<UsbIpDeviceInfo> currentDevices,
+        CancellationToken token)
+    {
+        if (previousDevices.Count == 0)
+        {
+            return 0;
+        }
+
+        var currentIdentityKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var current in currentDevices)
+        {
+            var key = BuildUsbDeviceIdentityKey(current);
+            if (!string.IsNullOrWhiteSpace(key))
+            {
+                currentIdentityKeys.Add(key);
+            }
+
+            foreach (var aliasKey in BuildUsbIdentityAliasKeys(current))
+            {
+                if (!string.IsNullOrWhiteSpace(aliasKey))
+                {
+                    currentIdentityKeys.Add(aliasKey);
+                }
+            }
+        }
+
+        var removedSharedDevices = previousDevices
+            .Where(device => device is not null && device.IsShared)
+            .Where(device =>
+            {
+                var identityKeys = BuildUsbIdentityAliasKeys(device)
+                    .Where(aliasKey => !string.IsNullOrWhiteSpace(aliasKey))
+                    .ToList();
+
+                var primaryKey = BuildUsbDeviceIdentityKey(device);
+                if (!string.IsNullOrWhiteSpace(primaryKey))
+                {
+                    identityKeys.Add(primaryKey);
+                }
+
+                if (identityKeys.Count == 0)
+                {
+                    return false;
+                }
+
+                return !identityKeys.Any(currentIdentityKeys.Contains);
+            })
+            .ToList();
+
+        if (removedSharedDevices.Count == 0)
+        {
+            return 0;
+        }
+
+        var releasedCount = 0;
+        foreach (var removed in removedSharedDevices)
+        {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(removed.PersistedGuid))
+                {
+                    await _usbIpService.UnbindByPersistedGuidAsync(removed.PersistedGuid.Trim(), token);
+                    releasedCount++;
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(removed.BusId))
+                {
+                    await _usbIpService.UnbindAsync(removed.BusId.Trim(), token);
+                    releasedCount++;
+                }
+            }
+            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+            {
+                return releasedCount;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex,
+                    "USB share cleanup for removed device failed. BusId={BusId}; Guid={Guid}",
+                    removed.BusId,
+                    removed.PersistedGuid);
+            }
+        }
+
+        if (releasedCount > 0)
+        {
+            Log.Information("Released share for removed USB devices. Count={Count}", releasedCount);
+        }
+
+        return releasedCount;
     }
 
     private async Task<int> TryDetachStaleAttachedDevicesWithoutGuestAckAsync(IReadOnlyList<UsbIpDeviceInfo> devices, CancellationToken token)
@@ -2056,6 +2212,7 @@ public partial class MainViewModel : ViewModelBase
         return string.Equals(left.BusId?.Trim(), right.BusId?.Trim(), StringComparison.OrdinalIgnoreCase)
                && string.Equals(left.Description?.Trim(), right.Description?.Trim(), StringComparison.Ordinal)
                && string.Equals(left.HardwareId?.Trim(), right.HardwareId?.Trim(), StringComparison.OrdinalIgnoreCase)
+             && string.Equals(left.HardwareIdentityKey?.Trim(), right.HardwareIdentityKey?.Trim(), StringComparison.OrdinalIgnoreCase)
                && string.Equals(left.InstanceId?.Trim(), right.InstanceId?.Trim(), StringComparison.OrdinalIgnoreCase)
                && string.Equals(left.PersistedGuid?.Trim(), right.PersistedGuid?.Trim(), StringComparison.OrdinalIgnoreCase)
                && string.Equals(left.ClientIpAddress?.Trim(), right.ClientIpAddress?.Trim(), StringComparison.OrdinalIgnoreCase)
@@ -2104,10 +2261,15 @@ public partial class MainViewModel : ViewModelBase
 
     private static string BuildUsbDeviceIdentityKey(UsbIpDeviceInfo device)
     {
-        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
-        if (!string.IsNullOrWhiteSpace(hardwareId))
+        var hardwareId = GetUsbHardwareIdentityCandidate(device);
+        if (!string.IsNullOrWhiteSpace(hardwareId) && IsPreciseUsbHardwareIdentity(hardwareId))
         {
             return "hardware:" + hardwareId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.InstanceId))
+        {
+            return "instance:" + device.InstanceId.Trim();
         }
 
         if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
@@ -2115,9 +2277,9 @@ public partial class MainViewModel : ViewModelBase
             return "guid:" + device.PersistedGuid.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(device.InstanceId))
+        if (!string.IsNullOrWhiteSpace(hardwareId))
         {
-            return "instance:" + device.InstanceId.Trim();
+            return "hardware:" + hardwareId;
         }
 
         if (!string.IsNullOrWhiteSpace(device.BusId))
@@ -2135,15 +2297,17 @@ public partial class MainViewModel : ViewModelBase
 
     private static IEnumerable<string> BuildUsbIdentityAliasKeys(UsbIpDeviceInfo device)
     {
-        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
+        var hardwareId = GetUsbHardwareIdentityCandidate(device);
         if (!string.IsNullOrWhiteSpace(hardwareId))
         {
             yield return "hardware:" + hardwareId;
         }
 
-        if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
+        var fallbackHardwareId = NormalizeUsbHardwareId(device.HardwareId);
+        if (!string.IsNullOrWhiteSpace(fallbackHardwareId)
+            && !string.Equals(fallbackHardwareId, hardwareId, StringComparison.OrdinalIgnoreCase))
         {
-            yield return "guid:" + device.PersistedGuid.Trim();
+            yield return "hardware:" + fallbackHardwareId;
         }
 
         if (!string.IsNullOrWhiteSpace(device.InstanceId))
@@ -2151,15 +2315,11 @@ public partial class MainViewModel : ViewModelBase
             yield return "instance:" + device.InstanceId.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(device.BusId))
+        if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
         {
-            yield return "busid:" + device.BusId.Trim();
+            yield return "guid:" + device.PersistedGuid.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(device.Description))
-        {
-            yield return "description:" + device.Description.Trim();
-        }
     }
 
     private static string BuildUsbAutoShareKey(UsbIpDeviceInfo device)
@@ -2185,22 +2345,28 @@ public partial class MainViewModel : ViewModelBase
             yield return "hardware:" + hardwareId;
         }
 
-        if (!string.IsNullOrWhiteSpace(device.Description))
+        var preciseHardwareId = NormalizeUsbHardwareId(device.HardwareIdentityKey);
+        if (!string.IsNullOrWhiteSpace(preciseHardwareId)
+            && !string.Equals(preciseHardwareId, hardwareId, StringComparison.OrdinalIgnoreCase))
         {
-            yield return "description:" + device.Description.Trim();
+            yield return "hardware:" + preciseHardwareId;
         }
+
     }
 
     private void TryMigrateLegacyUsbIdentityKeys(IReadOnlyList<UsbIpDeviceInfo> devices)
     {
-        if (_usbHardwareIdentityMigrationCompleted)
+        var hasLegacyBusIdKeys = _usbAutoShareDeviceKeys.Any(key => IsLegacyBusIdKey(key))
+                                 || _usbDeviceMetadataByKey.Keys.Any(key => IsLegacyBusIdKey(key));
+        var hasLegacyGuidKeys = _usbAutoShareDeviceKeys.Any(key => IsLegacyGuidKey(key))
+                                || _usbDeviceMetadataByKey.Keys.Any(key => IsLegacyGuidKey(key));
+
+        if (_usbHardwareIdentityMigrationCompleted && !hasLegacyBusIdKeys && !hasLegacyGuidKeys)
         {
             return;
         }
 
-        var hasLegacyBusIdKeys = _usbAutoShareDeviceKeys.Any(key => IsLegacyBusIdKey(key))
-                                 || _usbDeviceMetadataByKey.Keys.Any(key => IsLegacyBusIdKey(key));
-        if (!hasLegacyBusIdKeys)
+        if (!hasLegacyBusIdKeys && !hasLegacyGuidKeys)
         {
             _usbHardwareIdentityMigrationCompleted = true;
             PersistUsbAutoShareConfig();
@@ -2217,7 +2383,18 @@ public partial class MainViewModel : ViewModelBase
             .Where(item => !string.IsNullOrWhiteSpace(item.HardwareKey))
             .ToDictionary(item => item.BusKey, item => item.HardwareKey, StringComparer.OrdinalIgnoreCase);
 
-        if (hardwareByBusIdKey.Count == 0)
+        var preferredIdentityByGuidKey = devices
+            .Where(device => !string.IsNullOrWhiteSpace(device.PersistedGuid))
+            .Select(device => new
+            {
+                GuidKey = "guid:" + device.PersistedGuid.Trim(),
+                PreferredKey = BuildPreferredUsbMigrationKey(device)
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.PreferredKey)
+                           && !string.Equals(item.GuidKey, item.PreferredKey, StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(item => item.GuidKey, item => item.PreferredKey, StringComparer.OrdinalIgnoreCase);
+
+        if (hardwareByBusIdKey.Count == 0 && preferredIdentityByGuidKey.Count == 0)
         {
             return;
         }
@@ -2233,6 +2410,17 @@ public partial class MainViewModel : ViewModelBase
 
             changed = _usbAutoShareDeviceKeys.Remove(legacyKey) || changed;
             changed = _usbAutoShareDeviceKeys.Add(hardwareKey) || changed;
+        }
+
+        foreach (var legacyKey in _usbAutoShareDeviceKeys.Where(IsLegacyGuidKey).ToList())
+        {
+            if (!preferredIdentityByGuidKey.TryGetValue(legacyKey, out var mappedKey))
+            {
+                continue;
+            }
+
+            changed = _usbAutoShareDeviceKeys.Remove(legacyKey) || changed;
+            changed = _usbAutoShareDeviceKeys.Add(mappedKey) || changed;
         }
 
         foreach (var legacyKey in _usbDeviceMetadataByKey.Keys.Where(IsLegacyBusIdKey).ToList())
@@ -2272,9 +2460,48 @@ public partial class MainViewModel : ViewModelBase
             changed = _usbDeviceMetadataByKey.Remove(legacyKey) || changed;
         }
 
+        foreach (var legacyKey in _usbDeviceMetadataByKey.Keys.Where(IsLegacyGuidKey).ToList())
+        {
+            if (!preferredIdentityByGuidKey.TryGetValue(legacyKey, out var mappedKey)
+                || !_usbDeviceMetadataByKey.TryGetValue(legacyKey, out var legacyMetadata))
+            {
+                continue;
+            }
+
+            if (_usbDeviceMetadataByKey.TryGetValue(mappedKey, out var existingMetadata))
+            {
+                var mergedName = string.IsNullOrWhiteSpace(existingMetadata.CustomName)
+                    ? legacyMetadata.CustomName
+                    : existingMetadata.CustomName;
+                var mergedComment = string.IsNullOrWhiteSpace(existingMetadata.Comment)
+                    ? legacyMetadata.Comment
+                    : existingMetadata.Comment;
+
+                _usbDeviceMetadataByKey[mappedKey] = new UsbDeviceMetadataEntry
+                {
+                    DeviceKey = mappedKey,
+                    CustomName = (mergedName ?? string.Empty).Trim(),
+                    Comment = (mergedComment ?? string.Empty).Trim()
+                };
+            }
+            else
+            {
+                _usbDeviceMetadataByKey[mappedKey] = new UsbDeviceMetadataEntry
+                {
+                    DeviceKey = mappedKey,
+                    CustomName = (legacyMetadata.CustomName ?? string.Empty).Trim(),
+                    Comment = (legacyMetadata.Comment ?? string.Empty).Trim()
+                };
+            }
+
+            changed = _usbDeviceMetadataByKey.Remove(legacyKey) || changed;
+        }
+
         var hasRemainingLegacyBusIdKeys = _usbAutoShareDeviceKeys.Any(IsLegacyBusIdKey)
                                           || _usbDeviceMetadataByKey.Keys.Any(IsLegacyBusIdKey);
-        if (!hasRemainingLegacyBusIdKeys)
+        var hasRemainingLegacyGuidKeys = _usbAutoShareDeviceKeys.Any(IsLegacyGuidKey)
+                                         || _usbDeviceMetadataByKey.Keys.Any(IsLegacyGuidKey);
+        if (!hasRemainingLegacyBusIdKeys && !hasRemainingLegacyGuidKeys)
         {
             _usbHardwareIdentityMigrationCompleted = true;
             changed = true;
@@ -2294,10 +2521,65 @@ public partial class MainViewModel : ViewModelBase
                && key.StartsWith("busid:", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsLegacyGuidKey(string? key)
+    {
+        return !string.IsNullOrWhiteSpace(key)
+               && key.StartsWith("guid:", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool PurgeLegacyUsbBusIdKeysInMemory()
+    {
+        var changed = false;
+
+        foreach (var legacyKey in _usbAutoShareDeviceKeys.Where(IsLegacyBusIdKey).ToList())
+        {
+            changed = _usbAutoShareDeviceKeys.Remove(legacyKey) || changed;
+        }
+
+        foreach (var legacyKey in _usbDeviceMetadataByKey.Keys.Where(IsLegacyBusIdKey).ToList())
+        {
+            changed = _usbDeviceMetadataByKey.Remove(legacyKey) || changed;
+        }
+
+        if (changed)
+        {
+            _usbHardwareIdentityMigrationCompleted = true;
+        }
+
+        return changed;
+    }
+
     private static string BuildUsbHardwareIdentityKey(UsbIpDeviceInfo device)
     {
-        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
+        var hardwareId = GetUsbHardwareIdentityCandidate(device);
         return string.IsNullOrWhiteSpace(hardwareId) ? string.Empty : "hardware:" + hardwareId;
+    }
+
+    private static string BuildPreciseUsbHardwareIdentityKey(UsbIpDeviceInfo device)
+    {
+        var preciseHardwareId = NormalizeUsbHardwareId(device.HardwareIdentityKey);
+        if (string.IsNullOrWhiteSpace(preciseHardwareId) || !IsPreciseUsbHardwareIdentity(preciseHardwareId))
+        {
+            return string.Empty;
+        }
+
+        return "hardware:" + preciseHardwareId;
+    }
+
+    private static string BuildPreferredUsbMigrationKey(UsbIpDeviceInfo device)
+    {
+        var preciseHardwareKey = BuildPreciseUsbHardwareIdentityKey(device);
+        if (!string.IsNullOrWhiteSpace(preciseHardwareKey))
+        {
+            return preciseHardwareKey;
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.InstanceId))
+        {
+            return "instance:" + device.InstanceId.Trim();
+        }
+
+        return string.Empty;
     }
 
     private bool IsUsbAutoShareEnabledForDevice(UsbIpDeviceInfo device)
@@ -2306,6 +2588,14 @@ public partial class MainViewModel : ViewModelBase
         if (!string.IsNullOrWhiteSpace(key) && _usbAutoShareDeviceKeys.Contains(key))
         {
             return true;
+        }
+
+        foreach (var aliasKey in BuildUsbIdentityAliasKeys(device))
+        {
+            if (_usbAutoShareDeviceKeys.Contains(aliasKey))
+            {
+                return true;
+            }
         }
 
         foreach (var legacyKey in BuildUsbLegacyAutoShareKeys(device))
@@ -2332,12 +2622,15 @@ public partial class MainViewModel : ViewModelBase
 
         device.DeviceIdentityKey = deviceKey;
 
-        UsbDeviceMetadataEntry? metadata = null;
-        foreach (var lookupKey in BuildUsbIdentityAliasKeys(device))
+        _usbDeviceMetadataByKey.TryGetValue(deviceKey, out var metadata);
+        if (metadata is null)
         {
-            if (_usbDeviceMetadataByKey.TryGetValue(lookupKey, out metadata))
+            foreach (var lookupKey in BuildUsbIdentityAliasKeys(device))
             {
-                break;
+                if (_usbDeviceMetadataByKey.TryGetValue(lookupKey, out metadata))
+                {
+                    break;
+                }
             }
         }
 
@@ -2373,6 +2666,7 @@ public partial class MainViewModel : ViewModelBase
                 .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
                 .ToList();
             configResult.Config.Usb.HardwareIdentityMigrationCompleted = _usbHardwareIdentityMigrationCompleted;
+            configResult.Config.Usb.UsbConfigResetMigrationApplied = _usbConfigResetMigrationApplied;
 
             if (!_configService.TrySave(_configPath, configResult.Config, out var errorMessage))
             {
@@ -3516,6 +3810,7 @@ public partial class MainViewModel : ViewModelBase
                         .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
                         .ToList(),
                     HardwareIdentityMigrationCompleted = _usbHardwareIdentityMigrationCompleted
+                    ,UsbConfigResetMigrationApplied = _usbConfigResetMigrationApplied
                 },
                 SharedFolders = new SharedFolderSettings
                 {
@@ -3615,16 +3910,103 @@ public partial class MainViewModel : ViewModelBase
 
     public IReadOnlyList<UsbDeviceMetadataEntry> GetUsbDeviceMetadataSnapshot()
     {
-        return _usbDeviceMetadataByKey.Values
-            .Select(entry => new UsbDeviceMetadataEntry
+        var metadataByKey = new Dictionary<string, UsbDeviceMetadataEntry>(StringComparer.OrdinalIgnoreCase);
+        var now = DateTimeOffset.UtcNow;
+
+        var expiredAliasKeys = _usbMetadataBusAliasExpiresUtc
+            .Where(entry => entry.Value <= now)
+            .Select(entry => entry.Key)
+            .ToList();
+
+        foreach (var expiredAliasKey in expiredAliasKeys)
+        {
+            _usbMetadataBusAliasExpiresUtc.Remove(expiredAliasKey);
+            _usbMetadataBusAliasByKey.Remove(expiredAliasKey);
+        }
+
+        foreach (var entry in _usbDeviceMetadataByKey.Values)
+        {
+            var normalizedKey = (entry.DeviceKey ?? string.Empty).Trim();
+            var normalizedName = (entry.CustomName ?? string.Empty).Trim();
+            var normalizedComment = (entry.Comment ?? string.Empty).Trim();
+
+            if (string.IsNullOrWhiteSpace(normalizedKey)
+                || (string.IsNullOrWhiteSpace(normalizedName) && string.IsNullOrWhiteSpace(normalizedComment)))
             {
-                DeviceKey = (entry.DeviceKey ?? string.Empty).Trim(),
-                CustomName = (entry.CustomName ?? string.Empty).Trim(),
-                Comment = (entry.Comment ?? string.Empty).Trim()
-            })
-            .Where(entry => !string.IsNullOrWhiteSpace(entry.DeviceKey)
-                            && (!string.IsNullOrWhiteSpace(entry.CustomName)
-                                || !string.IsNullOrWhiteSpace(entry.Comment)))
+                continue;
+            }
+
+            metadataByKey[normalizedKey] = new UsbDeviceMetadataEntry
+            {
+                DeviceKey = normalizedKey,
+                CustomName = normalizedName,
+                Comment = normalizedComment
+            };
+        }
+
+        // Expose runtime bus mapping for guest metadata lookup compatibility.
+        foreach (var device in UsbDevices)
+        {
+            if (device is null || string.IsNullOrWhiteSpace(device.BusId))
+            {
+                continue;
+            }
+
+            UsbDeviceMetadataEntry? metadata = null;
+            var identityKey = !string.IsNullOrWhiteSpace(device.DeviceIdentityKey)
+                ? device.DeviceIdentityKey.Trim()
+                : BuildUsbDeviceIdentityKey(device);
+
+            if (!string.IsNullOrWhiteSpace(identityKey)
+                && _usbDeviceMetadataByKey.TryGetValue(identityKey, out var byIdentity))
+            {
+                metadata = byIdentity;
+            }
+            else
+            {
+                foreach (var aliasKey in BuildUsbIdentityAliasKeys(device))
+                {
+                    if (_usbDeviceMetadataByKey.TryGetValue(aliasKey, out var byAlias))
+                    {
+                        metadata = byAlias;
+                        break;
+                    }
+                }
+            }
+
+            if (metadata is null)
+            {
+                continue;
+            }
+
+            var normalizedName = (metadata.CustomName ?? string.Empty).Trim();
+            var normalizedComment = (metadata.Comment ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalizedName) && string.IsNullOrWhiteSpace(normalizedComment))
+            {
+                continue;
+            }
+
+            var busKey = "busid:" + device.BusId.Trim();
+            _usbMetadataBusAliasByKey[busKey] = new UsbDeviceMetadataEntry
+            {
+                DeviceKey = busKey,
+                CustomName = normalizedName,
+                Comment = normalizedComment
+            };
+            _usbMetadataBusAliasExpiresUtc[busKey] = now + UsbMetadataBusAliasTtl;
+        }
+
+        foreach (var alias in _usbMetadataBusAliasByKey.Values)
+        {
+            metadataByKey[alias.DeviceKey] = new UsbDeviceMetadataEntry
+            {
+                DeviceKey = alias.DeviceKey,
+                CustomName = alias.CustomName,
+                Comment = alias.Comment
+            };
+        }
+
+        return metadataByKey.Values
             .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
@@ -3714,16 +4096,25 @@ public partial class MainViewModel : ViewModelBase
         {
             foreach (var aliasKey in aliasKeys)
             {
-                if (_usbDeviceMetadataByKey.TryGetValue(aliasKey, out var existing)
-                    && string.Equals(existing.CustomName, normalizedName, StringComparison.Ordinal)
-                    && string.Equals(existing.Comment, normalizedComment, StringComparison.Ordinal))
+                if (string.Equals(aliasKey, key, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
 
-                _usbDeviceMetadataByKey[aliasKey] = new UsbDeviceMetadataEntry
+                changed = _usbDeviceMetadataByKey.Remove(aliasKey) || changed;
+            }
+
+            if (_usbDeviceMetadataByKey.TryGetValue(key, out var existing)
+                && string.Equals(existing.CustomName, normalizedName, StringComparison.Ordinal)
+                && string.Equals(existing.Comment, normalizedComment, StringComparison.Ordinal))
+            {
+                // no-op
+            }
+            else
+            {
+                _usbDeviceMetadataByKey[key] = new UsbDeviceMetadataEntry
                 {
-                    DeviceKey = aliasKey,
+                    DeviceKey = key,
                     CustomName = normalizedName,
                     Comment = normalizedComment
                 };
@@ -3894,6 +4285,7 @@ public partial class MainViewModel : ViewModelBase
             BusId = SelectedUsbDevice.BusId,
             Description = SelectedUsbDevice.Description,
             HardwareId = SelectedUsbDevice.HardwareId,
+            HardwareIdentityKey = SelectedUsbDevice.HardwareIdentityKey,
             InstanceId = SelectedUsbDevice.InstanceId,
             PersistedGuid = SelectedUsbDevice.PersistedGuid,
             ClientIpAddress = SelectedUsbDevice.ClientIpAddress,
@@ -3914,6 +4306,7 @@ public partial class MainViewModel : ViewModelBase
                 BusId = device.BusId,
                 Description = device.Description,
                 HardwareId = device.HardwareId,
+                HardwareIdentityKey = device.HardwareIdentityKey,
                 InstanceId = device.InstanceId,
                 PersistedGuid = device.PersistedGuid,
                 ClientIpAddress = device.ClientIpAddress,
@@ -3944,12 +4337,6 @@ public partial class MainViewModel : ViewModelBase
 
     private static string BuildUsbSelectionKey(UsbIpDeviceInfo device)
     {
-        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
-        if (!string.IsNullOrWhiteSpace(hardwareId))
-        {
-            return "hardware:" + hardwareId;
-        }
-
         if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
         {
             return "guid:" + device.PersistedGuid.Trim();
@@ -3958,6 +4345,19 @@ public partial class MainViewModel : ViewModelBase
         if (!string.IsNullOrWhiteSpace(device.InstanceId))
         {
             return "instance:" + device.InstanceId.Trim();
+        }
+
+        var hardwareId = GetUsbHardwareIdentityCandidate(device);
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            var key = "hardware:" + hardwareId;
+            if (!IsPreciseUsbHardwareIdentity(hardwareId)
+                && !string.IsNullOrWhiteSpace(device.BusId))
+            {
+                key += "|busid:" + device.BusId.Trim();
+            }
+
+            return key;
         }
 
         if (!string.IsNullOrWhiteSpace(device.BusId))
@@ -3975,7 +4375,30 @@ public partial class MainViewModel : ViewModelBase
             return string.Empty;
         }
 
-        return hardwareId.Trim().ToUpperInvariant();
+        var normalized = hardwareId.Trim().ToUpperInvariant();
+        if (normalized.StartsWith("USB\\", StringComparison.Ordinal))
+        {
+            normalized = normalized.Substring(4);
+        }
+
+        return normalized;
+    }
+
+    private static string GetUsbHardwareIdentityCandidate(UsbIpDeviceInfo device)
+    {
+        var precise = NormalizeUsbHardwareId(device.HardwareIdentityKey);
+        if (!string.IsNullOrWhiteSpace(precise))
+        {
+            return precise;
+        }
+
+        return NormalizeUsbHardwareId(device.HardwareId);
+    }
+
+    private static bool IsPreciseUsbHardwareIdentity(string hardwareIdentity)
+    {
+        return !string.IsNullOrWhiteSpace(hardwareIdentity)
+               && hardwareIdentity.Contains("&REV_", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task RefreshUsbDevicesFromTrayAsync()
@@ -4063,7 +4486,10 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(normalizedHardwareId))
+        // BusId from guest event is authoritative. Hardware-based resolution is
+        // only used as fallback when BusId is missing.
+        if (string.IsNullOrWhiteSpace(normalizedBusId)
+            && !string.IsNullOrWhiteSpace(normalizedHardwareId))
         {
             try
             {
@@ -4073,7 +4499,8 @@ public partial class MainViewModel : ViewModelBase
                 var currentMatch = devices.FirstOrDefault(device =>
                     device.IsAttached
                     && !string.IsNullOrWhiteSpace(device.BusId)
-                    && string.Equals(NormalizeUsbHardwareId(device.HardwareId), normalizedHardwareId, StringComparison.OrdinalIgnoreCase));
+                    && (string.Equals(NormalizeUsbHardwareId(device.HardwareId), normalizedHardwareId, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(NormalizeUsbHardwareId(device.HardwareIdentityKey), normalizedHardwareId, StringComparison.OrdinalIgnoreCase)));
 
                 if (currentMatch is not null)
                 {
@@ -4155,6 +4582,34 @@ public partial class MainViewModel : ViewModelBase
                 catch (Exception ex)
                 {
                     lastDetachError = ex;
+
+                    // Physical unplug races with detach can report transient "not found".
+                    // Re-check host state and finish quietly when device is already free.
+                    if (IsUsbDetachNoOpError(ex))
+                    {
+                        try
+                        {
+                            var hostDeviceAfterError = await GetHostUsbStateAsync(normalizedBusId, TimeSpan.FromSeconds(8));
+                            if (hostDeviceAfterError is null || !hostDeviceAfterError.IsAttached)
+                            {
+                                _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
+                                _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
+                                _usbForceDetachFallbackBusIds.Remove(normalizedBusId);
+                                _usbGuestManagedBusIds.Remove(normalizedBusId);
+                                Log.Information("USB detach skipped after client disconnect because device is already free after detach race. BusId={BusId}", normalizedBusId);
+                                return;
+                            }
+                        }
+                        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+                        {
+                            return;
+                        }
+                        catch (Exception stateEx)
+                        {
+                            Log.Debug(stateEx, "USB state re-check after detach race failed. BusId={BusId}", normalizedBusId);
+                        }
+                    }
+
                     if (attempt < immediateDetachAttempts)
                     {
                         try
@@ -4230,6 +4685,16 @@ public partial class MainViewModel : ViewModelBase
                 _usbTrayRefreshGate.Release();
             }
         }
+    }
+
+    private static bool IsUsbDetachNoOpError(Exception ex)
+    {
+        var text = ex.ToString();
+        return text.Contains("Device not found by bus id", StringComparison.OrdinalIgnoreCase)
+               || text.Contains("not found", StringComparison.OrdinalIgnoreCase)
+               || text.Contains("already detached", StringComparison.OrdinalIgnoreCase)
+               || text.Contains("is not attached", StringComparison.OrdinalIgnoreCase)
+               || text.Contains("does not exist", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task ShareSelectedUsbFromTrayAsync()
@@ -5078,13 +5543,32 @@ public partial class MainViewModel : ViewModelBase
                     }
                 }
                 _usbHardwareIdentityMigrationCompleted = config.Usb.HardwareIdentityMigrationCompleted;
+                _usbConfigResetMigrationApplied = config.Usb.UsbConfigResetMigrationApplied;
                 ApplyConfiguredSharedFolders(config.SharedFolders.HostDefinitions);
+
+                if (!_usbConfigResetMigrationApplied)
+                {
+                    _usbAutoShareDeviceKeys.Clear();
+                    _usbDeviceMetadataByKey.Clear();
+                    _usbMetadataBusAliasByKey.Clear();
+                    _usbMetadataBusAliasExpiresUtc.Clear();
+                    _usbHardwareIdentityMigrationCompleted = true;
+                    _usbConfigResetMigrationApplied = true;
+                    PersistUsbAutoShareConfig();
+                    AddNotification("USB-Konfiguration wurde für das neue Mapping einmalig zurückgesetzt. Bitte Auto-Share und Kommentare neu setzen.", "Info");
+                }
+
+                var removedLegacyUsbKeysOnReload = PurgeLegacyUsbBusIdKeysInMemory();
+                if (removedLegacyUsbKeysOnReload)
+                {
+                    PersistUsbAutoShareConfig();
+                }
 
                 _suppressUsbAutoShareToggleHandling = true;
                 try
                 {
                     SelectedUsbDeviceAutoShareEnabled = SelectedUsbDevice is not null
-                        && _usbAutoShareDeviceKeys.Contains(BuildUsbAutoShareKey(SelectedUsbDevice));
+                        && IsUsbAutoShareEnabledForDevice(SelectedUsbDevice);
                 }
                 finally
                 {
@@ -5445,8 +5929,11 @@ public partial class MainViewModel : ViewModelBase
                 }
             }
             _usbHardwareIdentityMigrationCompleted = config.Usb.HardwareIdentityMigrationCompleted;
+            _usbConfigResetMigrationApplied = config.Usb.UsbConfigResetMigrationApplied;
 
             _usbDeviceMetadataByKey.Clear();
+            _usbMetadataBusAliasByKey.Clear();
+            _usbMetadataBusAliasExpiresUtc.Clear();
             foreach (var metadata in config.Usb.DeviceMetadata)
             {
                 if (metadata is null)
@@ -5473,6 +5960,24 @@ public partial class MainViewModel : ViewModelBase
                     CustomName = customName,
                     Comment = comment
                 };
+            }
+
+            var removedLegacyUsbKeysOnReload = PurgeLegacyUsbBusIdKeysInMemory();
+            if (removedLegacyUsbKeysOnReload)
+            {
+                PersistUsbAutoShareConfig();
+            }
+
+            if (!_usbConfigResetMigrationApplied)
+            {
+                _usbAutoShareDeviceKeys.Clear();
+                _usbDeviceMetadataByKey.Clear();
+                _usbMetadataBusAliasByKey.Clear();
+                _usbMetadataBusAliasExpiresUtc.Clear();
+                _usbHardwareIdentityMigrationCompleted = true;
+                _usbConfigResetMigrationApplied = true;
+                PersistUsbAutoShareConfig();
+                AddNotification("USB-Konfiguration wurde für das neue Mapping einmalig zurückgesetzt. Bitte Auto-Share und Kommentare neu setzen.", "Info");
             }
 
             ApplyConfiguredSharedFolders(config.SharedFolders.HostDefinitions);

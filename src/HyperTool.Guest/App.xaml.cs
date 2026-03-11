@@ -25,6 +25,7 @@ public sealed partial class App : Application
     private const int GuestUsbAutoRefreshSeconds = 4;
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
     private const int GuestUsbHeartbeatIntervalSeconds = 45;
+    private static readonly TimeSpan UsbRefreshSuccessLogHeartbeatInterval = TimeSpan.FromSeconds(45);
     private const int SharedFolderCatalogFetchMaxAttempts = 3;
     private static readonly TimeSpan SharedFolderCatalogReadyLogHeartbeatInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan RecurringWarnRateLimitInterval = TimeSpan.FromMinutes(2);
@@ -130,6 +131,8 @@ public sealed partial class App : Application
     private string _sharedFolderReconnectLastSummary = "Noch kein Lauf";
     private DateTimeOffset? _sharedFolderCatalogReadyLastLoggedUtc;
     private string _sharedFolderCatalogReadyLastStateKey = string.Empty;
+    private DateTimeOffset? _usbRefreshSuccessLastLoggedUtc;
+    private string _usbRefreshSuccessLastStateKey = string.Empty;
 
     private sealed class RateLimitedWarnState
     {
@@ -2174,27 +2177,40 @@ public sealed partial class App : Application
 
             if (emitLogs)
             {
-                GuestLogger.Info("usb.refresh.success", "USB-Geräte aktualisiert.", new
-                {
-                    operationId,
-                    elapsedMs = stopwatch.ElapsedMilliseconds,
-                    count = _usbDevices.Count,
-                    selectedBusId = _selectedUsbBusId,
-                    attachedCount = _usbDevices.Count(item => item.IsAttached),
-                    sharedCount = _usbDevices.Count(item => item.IsShared),
+                var shouldLogRefreshSuccess = ShouldLogUsbRefreshSuccess(
+                    _usbDevices,
+                    _selectedUsbBusId,
                     autoConnectApplied,
                     retryTriggered,
-                    previousCount,
-                    listSource = useRemoteHostList ? "remote-host" : "local-state",
-                    hostAddress = hostResolution.ResolvedIpv4,
-                    hostSource = hostResolution.Source,
-                    hostInput = hostResolution.RawInput,
-                    transportPath = fallbackToIpUsed
-                        ? "ip-fallback"
-                        : (string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase) ? "hyperv" : "ip-fallback"),
-                    fallbackToIpUsed,
-                    fallbackHostAddress
-                });
+                    out var refreshStateKey);
+
+                if (shouldLogRefreshSuccess)
+                {
+                    GuestLogger.Info("usb.refresh.success", "USB-Geräte aktualisiert.", new
+                    {
+                        operationId,
+                        elapsedMs = stopwatch.ElapsedMilliseconds,
+                        count = _usbDevices.Count,
+                        selectedBusId = _selectedUsbBusId,
+                        attachedCount = _usbDevices.Count(item => item.IsAttached),
+                        sharedCount = _usbDevices.Count(item => item.IsShared),
+                        autoConnectApplied,
+                        retryTriggered,
+                        previousCount,
+                        listSource = useRemoteHostList ? "remote-host" : "local-state",
+                        hostAddress = hostResolution.ResolvedIpv4,
+                        hostSource = hostResolution.Source,
+                        hostInput = hostResolution.RawInput,
+                        transportPath = fallbackToIpUsed
+                            ? "ip-fallback"
+                            : (string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase) ? "hyperv" : "ip-fallback"),
+                        fallbackToIpUsed,
+                        fallbackHostAddress
+                    });
+
+                    _usbRefreshSuccessLastStateKey = refreshStateKey;
+                    _usbRefreshSuccessLastLoggedUtc = DateTimeOffset.UtcNow;
+                }
             }
 
             return _usbDevices;
@@ -2347,6 +2363,14 @@ public sealed partial class App : Application
         var hostResolution = ResolveUsbHostAddressDiagnostics();
         ApplyUsbTransportResolution(hostResolution);
         var beforeDevice = FindUsbByBusId(busId);
+
+        if (beforeDevice?.IsAttached == true
+            && string.Equals(beforeDevice.ClientIpAddress?.Trim(), HyperVSocketUsbTunnelDefaults.LoopbackAddress, StringComparison.OrdinalIgnoreCase))
+        {
+            _selectedUsbBusId = busId;
+            await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
+            return 0;
+        }
 
         GuestLogger.Info("usb.connect.begin", "USB Host-Attach gestartet.", new
         {
@@ -3755,7 +3779,7 @@ public sealed partial class App : Application
             .Where(device =>
                 !string.IsNullOrWhiteSpace(device.BusId)
                 && !device.IsAttached
-                && keySet.Contains(BuildUsbAutoConnectKey(device))
+                && IsConfiguredAutoConnectForDevice(keySet, devices, device)
                 && IsUsbAutoConnectAllowedNow(device.BusId!.Trim(), now, ref backoffSkipped))
             .Select(device => device.BusId.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -3793,6 +3817,40 @@ public sealed partial class App : Application
         return connectedCount;
     }
 
+    private bool ShouldLogUsbRefreshSuccess(
+        IReadOnlyList<UsbIpDeviceInfo> devices,
+        string? selectedBusId,
+        int autoConnectApplied,
+        bool retryTriggered,
+        out string stateKey)
+    {
+        var stateParts = devices
+            .Where(device => !string.IsNullOrWhiteSpace(device.BusId))
+            .Select(device =>
+            {
+                var state = device.IsAttached ? "A" : (device.IsShared ? "S" : "F");
+                return $"{device.BusId.Trim()}:{state}";
+            })
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        stateKey = string.Join("|", stateParts) + "|sel:" + (selectedBusId ?? string.Empty).Trim();
+
+        if (!string.Equals(_usbRefreshSuccessLastStateKey, stateKey, StringComparison.Ordinal)
+            || autoConnectApplied > 0
+            || retryTriggered)
+        {
+            return true;
+        }
+
+        if (!_usbRefreshSuccessLastLoggedUtc.HasValue)
+        {
+            return true;
+        }
+
+        return (DateTimeOffset.UtcNow - _usbRefreshSuccessLastLoggedUtc.Value) >= UsbRefreshSuccessLogHeartbeatInterval;
+    }
+
     private bool IsUsbAutoConnectAllowedNow(string busId, DateTimeOffset now, ref int backoffSkipped)
     {
         if (!_usbAutoConnectBackoffUntilUtc.TryGetValue(busId, out var blockedUntilUtc))
@@ -3812,10 +3870,21 @@ public sealed partial class App : Application
 
     private static string BuildUsbDeviceIdentityKey(UsbIpDeviceInfo device)
     {
-        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
-        if (!string.IsNullOrWhiteSpace(hardwareId))
+        if (!string.IsNullOrWhiteSpace(device.DeviceIdentityKey))
         {
-            return "hardware:" + hardwareId;
+            return device.DeviceIdentityKey.Trim();
+        }
+
+        var preciseHardwareId = NormalizeUsbHardwareId(device.HardwareIdentityKey);
+        if (!string.IsNullOrWhiteSpace(preciseHardwareId)
+            && preciseHardwareId.Contains("&REV_", StringComparison.OrdinalIgnoreCase))
+        {
+            return "hardware:" + preciseHardwareId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.InstanceId))
+        {
+            return "instance:" + device.InstanceId.Trim();
         }
 
         if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
@@ -3823,9 +3892,10 @@ public sealed partial class App : Application
             return "guid:" + device.PersistedGuid.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(device.InstanceId))
+        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
+        if (!string.IsNullOrWhiteSpace(hardwareId))
         {
-            return "instance:" + device.InstanceId.Trim();
+            return "hardware:" + hardwareId;
         }
 
         if (!string.IsNullOrWhiteSpace(device.BusId))
@@ -3843,15 +3913,15 @@ public sealed partial class App : Application
 
     private static IEnumerable<string> BuildUsbIdentityAliasKeys(UsbIpDeviceInfo device)
     {
-        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
-        if (!string.IsNullOrWhiteSpace(hardwareId))
+        if (!string.IsNullOrWhiteSpace(device.DeviceIdentityKey))
         {
-            yield return "hardware:" + hardwareId;
+            yield return device.DeviceIdentityKey.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
+        var preciseHardwareId = NormalizeUsbHardwareId(device.HardwareIdentityKey);
+        if (!string.IsNullOrWhiteSpace(preciseHardwareId))
         {
-            yield return "guid:" + device.PersistedGuid.Trim();
+            yield return "hardware:" + preciseHardwareId;
         }
 
         if (!string.IsNullOrWhiteSpace(device.InstanceId))
@@ -3859,20 +3929,90 @@ public sealed partial class App : Application
             yield return "instance:" + device.InstanceId.Trim();
         }
 
+        if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
+        {
+            yield return "guid:" + device.PersistedGuid.Trim();
+        }
+
+        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            yield return "hardware:" + hardwareId;
+        }
+
         if (!string.IsNullOrWhiteSpace(device.BusId))
         {
             yield return "busid:" + device.BusId.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(device.Description))
-        {
-            yield return "description:" + device.Description.Trim();
-        }
     }
 
     private static string BuildUsbAutoConnectKey(UsbIpDeviceInfo device)
     {
+        var specific = BuildUsbAutoConnectSpecificKey(device);
+        if (!string.IsNullOrWhiteSpace(specific))
+        {
+            return specific;
+        }
+
         return BuildUsbDeviceIdentityKey(device);
+    }
+
+    private static string BuildUsbAutoConnectBaseKey(UsbIpDeviceInfo device)
+    {
+        return BuildUsbDeviceIdentityKey(device);
+    }
+
+    private static string BuildUsbAutoConnectSpecificKey(UsbIpDeviceInfo device)
+    {
+        var baseKey = BuildUsbAutoConnectBaseKey(device);
+        if (string.IsNullOrWhiteSpace(baseKey))
+        {
+            return string.Empty;
+        }
+
+        var label = !string.IsNullOrWhiteSpace(device.CustomName)
+            ? device.CustomName
+            : device.CustomComment;
+
+        return string.IsNullOrWhiteSpace(label)
+            ? string.Empty
+            : baseKey + "|meta:" + label.Trim().ToUpperInvariant();
+    }
+
+    private static bool IsConfiguredAutoConnectForDevice(HashSet<string> configuredKeys, IReadOnlyList<UsbIpDeviceInfo> devices, UsbIpDeviceInfo device)
+    {
+        var baseKey = BuildUsbAutoConnectBaseKey(device);
+        if (string.IsNullOrWhiteSpace(baseKey))
+        {
+            return false;
+        }
+
+        var specificKey = BuildUsbAutoConnectSpecificKey(device);
+        if (!string.IsNullOrWhiteSpace(specificKey) && configuredKeys.Contains(specificKey))
+        {
+            return true;
+        }
+
+        // If the base key is ambiguous (same identity for multiple devices),
+        // only a specific metadata key may trigger auto-connect.
+        var baseGroupCount = devices.Count(candidate =>
+            !string.IsNullOrWhiteSpace(candidate.BusId)
+            && string.Equals(BuildUsbAutoConnectBaseKey(candidate), baseKey, StringComparison.OrdinalIgnoreCase));
+
+        if (baseGroupCount > 1)
+        {
+            return false;
+        }
+
+        if (configuredKeys.Contains(baseKey))
+        {
+            return true;
+        }
+
+        var legacyMetaPrefix = baseKey + "|meta:";
+        return configuredKeys.Any(configuredKey =>
+            configuredKey.StartsWith(legacyMetaPrefix, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string NormalizeUsbHardwareId(string? hardwareId)
@@ -3882,7 +4022,13 @@ public sealed partial class App : Application
             return string.Empty;
         }
 
-        return hardwareId.Trim().ToUpperInvariant();
+        var normalized = hardwareId.Trim().ToUpperInvariant();
+        if (normalized.StartsWith("USB\\", StringComparison.Ordinal))
+        {
+            normalized = normalized.Substring(4);
+        }
+
+        return normalized;
     }
 
     private void ApplyHostUsbMetadata(UsbIpDeviceInfo device)
