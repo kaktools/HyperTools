@@ -25,3 +25,13 @@ src/HyperTool.Guestx86/
 build-guestx86.bat
 build_guestx86.bat
 build_installer_guestx86.bat
+
+# Local-only tooling/build scripts
+installer/
+tools/
+build_all.bat
+build-all.bat
+build-guest.bat
+build-host.bat
+build-installer-guest.bat
+build-installer-host.bat

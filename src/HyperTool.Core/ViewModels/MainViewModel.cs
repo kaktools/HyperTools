@@ -28,6 +28,7 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private static readonly TimeSpan MonitorAgentTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan HostMonitorTimeout = TimeSpan.FromSeconds(8);
 
     [ObservableProperty]
     private string _windowTitle = "HyperTool";
@@ -434,6 +435,7 @@ public partial class MainViewModel : ViewModelBase
     private bool _isHandlingMenuSelectionChange;
     private bool _suppressUsbAutoShareToggleHandling;
     private readonly SemaphoreSlim _usbTrayRefreshGate = new(1, 1);
+    private readonly SemaphoreSlim _vmStatusRefreshGate = new(1, 1);
     private readonly HashSet<string> _usbAutoShareDeviceKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbDeviceMetadataByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbMetadataBusAliasByKey = new(StringComparer.OrdinalIgnoreCase);
@@ -470,13 +472,29 @@ public partial class MainViewModel : ViewModelBase
 
         public string State { get; set; } = "Guest nicht erreichbar";
 
+        public string ActiveSource { get; set; } = "none";
+
+        public double GuestCpuPercent { get; set; }
+
+        public double GuestRamUsedGb { get; set; }
+
+        public double GuestRamTotalGb { get; set; }
+
+        public DateTimeOffset LastGuestSeenUtc { get; set; } = DateTimeOffset.MinValue;
+
+        public double HostCpuPercent { get; set; }
+
+        public double HostRamUsedGb { get; set; }
+
+        public double HostRamTotalGb { get; set; }
+
+        public DateTimeOffset LastHostSeenUtc { get; set; } = DateTimeOffset.MinValue;
+
         public double CpuPercent { get; set; }
 
         public double RamUsedGb { get; set; }
 
         public double RamTotalGb { get; set; }
-
-        public DateTimeOffset LastSeenUtc { get; set; } = DateTimeOffset.MinValue;
 
         public Queue<double> CpuHistory { get; } = new();
 
@@ -1425,6 +1443,7 @@ public partial class MainViewModel : ViewModelBase
                 AvailableVms.Add(new VmDefinition
                 {
                     Name = vmInfo.Name,
+                    VmId = vmInfo.VmId,
                     Label = label,
                     RuntimeState = vmInfo.State,
                     RuntimeSwitchName = NormalizeSwitchDisplayName(vmInfo.CurrentSwitchName),
@@ -3219,19 +3238,35 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        await ExecuteBusyActionAsync("VM-Status wird aktualisiert...", async token =>
+        if (!await _vmStatusRefreshGate.WaitAsync(0))
         {
-            var vms = await _hyperVService.GetVmsAsync(token);
-            UpdateVmRuntimeStates(vms);
+            return;
+        }
 
-            var vmInfo = vms.FirstOrDefault(item => string.Equals(item.Name, SelectedVm.Name, StringComparison.OrdinalIgnoreCase));
-            SelectedVmState = vmInfo?.State ?? "Unbekannt";
-            SelectedVmCurrentSwitch = NormalizeSwitchDisplayName(vmInfo?.CurrentSwitchName);
-            NotifyTrayStateChanged();
-            StatusText = vmInfo is null ? "VM nicht gefunden" : $"{vmInfo.Name}: {vmInfo.State}";
-        }, showNotificationOnErrorOnly: true);
+        try
+        {
+            var targetVmName = SelectedVm.Name;
 
-        await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+            await ExecuteBusyActionAsync("VM-Status wird aktualisiert...", async token =>
+            {
+                var vmInfo = await _hyperVService.GetVmAsync(targetVmName, token);
+                if (vmInfo is not null)
+                {
+                    UpdateSingleVmRuntimeState(vmInfo);
+                }
+
+                SelectedVmState = vmInfo?.State ?? "Unbekannt";
+                SelectedVmCurrentSwitch = NormalizeSwitchDisplayName(vmInfo?.CurrentSwitchName);
+                NotifyTrayStateChanged();
+                StatusText = vmInfo is null ? "VM nicht gefunden" : $"{vmInfo.Name}: {vmInfo.State}";
+            }, showNotificationOnErrorOnly: true);
+
+            await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+        }
+        finally
+        {
+            _vmStatusRefreshGate.Release();
+        }
     }
 
     private void UpdateVmRuntimeStates(IReadOnlyList<HyperVVmInfo> runtimeVms)
@@ -3248,6 +3283,10 @@ public partial class MainViewModel : ViewModelBase
         var trayAdapterByName = AvailableVms
             .GroupBy(vm => vm.Name, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First().TrayAdapterName, StringComparer.OrdinalIgnoreCase);
+
+        var vmIdByName = AvailableVms
+            .GroupBy(vm => vm.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().VmId, StringComparer.OrdinalIgnoreCase);
 
         var sessionEditByName = AvailableVms
             .GroupBy(vm => vm.Name, StringComparer.OrdinalIgnoreCase)
@@ -3273,6 +3312,9 @@ public partial class MainViewModel : ViewModelBase
             .Select(vm => new VmDefinition
             {
                 Name = vm.Name,
+                VmId = string.IsNullOrWhiteSpace(vm.VmId)
+                    ? (vmIdByName.TryGetValue(vm.Name, out var existingVmId) ? existingVmId : string.Empty)
+                    : vm.VmId,
                 Label = labelsByName.TryGetValue(vm.Name, out var label) && !string.IsNullOrWhiteSpace(label) ? label : vm.Name,
                 RuntimeState = vm.State,
                 RuntimeSwitchName = NormalizeSwitchDisplayName(vm.CurrentSwitchName),
@@ -3304,6 +3346,31 @@ public partial class MainViewModel : ViewModelBase
         SelectedDefaultVmForConfig = AvailableVms.FirstOrDefault(vm => string.Equals(vm.Name, defaultName, StringComparison.OrdinalIgnoreCase))
                                    ?? SelectedVm;
         NotifyTrayStateChanged();
+    }
+
+    private void UpdateSingleVmRuntimeState(HyperVVmInfo runtimeVm)
+    {
+        if (runtimeVm is null || string.IsNullOrWhiteSpace(runtimeVm.Name))
+        {
+            return;
+        }
+
+        var existing = AvailableVms.FirstOrDefault(vm =>
+            string.Equals(vm.Name, runtimeVm.Name, StringComparison.OrdinalIgnoreCase));
+        if (existing is null)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(runtimeVm.VmId))
+        {
+            existing.VmId = runtimeVm.VmId;
+        }
+
+        existing.RuntimeState = runtimeVm.State;
+        existing.RuntimeSwitchName = NormalizeSwitchDisplayName(runtimeVm.CurrentSwitchName);
+        existing.HasMountedIso = runtimeVm.HasMountedIso;
+        existing.MountedIsoPath = runtimeVm.MountedIsoPath;
     }
 
     private async Task LoadCheckpointsAsync()
@@ -3986,6 +4053,7 @@ public partial class MainViewModel : ViewModelBase
             .Select(vm => new VmDefinition
             {
                 Name = vm.Name,
+                VmId = vm.VmId,
                 Label = vm.Label,
                 TrayAdapterName = vm.TrayAdapterName,
                 OpenConsoleWithSessionEdit = vm.OpenConsoleWithSessionEdit,
@@ -5210,7 +5278,8 @@ public partial class MainViewModel : ViewModelBase
 
         lock (_resourceMonitorSync)
         {
-            var vmName = ResolveVmNameForMonitorPacket(packet.Vm);
+            var now = DateTimeOffset.UtcNow;
+            var vmName = ResolveVmNameForMonitorPacket(packet.Vm, packet.SourceVmId);
             if (!_vmMonitorStates.TryGetValue(vmName, out var state))
             {
                 state = new VmResourceMonitorRuntimeState
@@ -5220,23 +5289,186 @@ public partial class MainViewModel : ViewModelBase
                 _vmMonitorStates[vmName] = state;
             }
 
-            state.State = "Connected";
-            state.CpuPercent = Math.Clamp(packet.Cpu, 0d, 100d);
-            state.RamUsedGb = Math.Max(0d, packet.RamUsed);
-            state.RamTotalGb = Math.Max(0d, packet.RamTotal);
-            state.LastSeenUtc = DateTimeOffset.UtcNow;
+            state.GuestCpuPercent = Math.Clamp(packet.Cpu, 0d, 100d);
+            state.GuestRamUsedGb = Math.Max(0d, packet.RamUsed);
+            state.GuestRamTotalGb = Math.Max(0d, packet.RamTotal);
+            state.LastGuestSeenUtc = now;
 
-            EnqueueHistory(state.CpuHistory, state.CpuPercent);
-            var pressure = state.RamTotalGb <= 0 ? 0 : (state.RamUsedGb / state.RamTotalGb) * 100d;
-            EnqueueHistory(state.RamPressureHistory, Math.Clamp(pressure, 0d, 100d));
+            ApplyPreferredMonitorSource(state, isVmRunning: true, now, enqueueHistory: true);
         }
 
         ApplyVmMonitorStateToVmDefinitions();
         ResourceMonitorVersion++;
     }
 
-    private string ResolveVmNameForMonitorPacket(string rawPacketVmName)
+    public async Task RefreshHostVmResourceMonitoringAsync(CancellationToken token)
     {
+        IReadOnlyList<VmHostResourcePacket> packets;
+        try
+        {
+            packets = await _hyperVService.GetVmHostResourceMetricsAsync(token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Host VM monitor sampling failed.");
+            return;
+        }
+
+        UpdateHostVmResourceMonitoring(packets);
+    }
+
+    public void UpdateHostVmResourceMonitoring(IReadOnlyList<VmHostResourcePacket> packets)
+    {
+        lock (_resourceMonitorSync)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var packetByVmName = new Dictionary<string, VmHostResourcePacket>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var packet in packets ?? [])
+            {
+                if (packet is null)
+                {
+                    continue;
+                }
+
+                var vmName = ResolveVmNameForHostPacket(packet);
+                if (string.IsNullOrWhiteSpace(vmName))
+                {
+                    continue;
+                }
+
+                packetByVmName[vmName] = packet;
+
+                if (!_vmMonitorStates.TryGetValue(vmName, out var state))
+                {
+                    state = new VmResourceMonitorRuntimeState
+                    {
+                        VmName = vmName
+                    };
+                    _vmMonitorStates[vmName] = state;
+                }
+
+                state.HostCpuPercent = Math.Clamp(packet.CpuPercent, 0d, 100d);
+                state.HostRamUsedGb = Math.Max(0d, packet.RamUsedGb);
+                state.HostRamTotalGb = Math.Max(state.HostRamUsedGb, Math.Max(0d, packet.RamTotalGb));
+                state.LastHostSeenUtc = now;
+            }
+
+            foreach (var vm in AvailableVms)
+            {
+                if (!_vmMonitorStates.TryGetValue(vm.Name, out var state))
+                {
+                    state = new VmResourceMonitorRuntimeState
+                    {
+                        VmName = vm.Name
+                    };
+                    _vmMonitorStates[vm.Name] = state;
+                }
+
+                if (packetByVmName.ContainsKey(vm.Name))
+                {
+                    ApplyPreferredMonitorSource(state, IsRunningState(vm.RuntimeState), now, enqueueHistory: true);
+                }
+            }
+        }
+
+        ApplyVmMonitorStateToVmDefinitions();
+        ResourceMonitorVersion++;
+    }
+
+    private string ResolveVmNameForHostPacket(VmHostResourcePacket packet)
+    {
+        var vmId = (packet.VmId ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(vmId))
+        {
+            var vmById = AvailableVms.FirstOrDefault(vm =>
+                !string.IsNullOrWhiteSpace(vm.VmId)
+                && string.Equals(vm.VmId, vmId, StringComparison.OrdinalIgnoreCase));
+            if (vmById is not null)
+            {
+                return vmById.Name;
+            }
+        }
+
+        var vmName = (packet.VmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(vmName))
+        {
+            return string.Empty;
+        }
+
+        var vmByName = AvailableVms.FirstOrDefault(vm =>
+            string.Equals(vm.Name, vmName, StringComparison.OrdinalIgnoreCase));
+        if (vmByName is not null)
+        {
+            return vmByName.Name;
+        }
+
+        return vmName;
+    }
+
+    private void ApplyPreferredMonitorSource(VmResourceMonitorRuntimeState state, bool isVmRunning, DateTimeOffset now, bool enqueueHistory)
+    {
+        if (!isVmRunning)
+        {
+            state.State = "Guest nicht erreichbar";
+            state.ActiveSource = "none";
+            return;
+        }
+
+        var guestFresh = (now - state.LastGuestSeenUtc) <= TimeSpan.FromMilliseconds(Math.Max(_monitorIntervalMs * 3, (int)MonitorAgentTimeout.TotalMilliseconds));
+        var hostFresh = (now - state.LastHostSeenUtc) <= TimeSpan.FromMilliseconds(Math.Max(_monitorIntervalMs * 4, (int)HostMonitorTimeout.TotalMilliseconds));
+
+        if (guestFresh)
+        {
+            state.State = "Connected";
+            state.ActiveSource = "guest";
+            state.CpuPercent = state.GuestCpuPercent;
+            state.RamUsedGb = state.GuestRamUsedGb;
+            state.RamTotalGb = state.GuestRamTotalGb;
+        }
+        else if (hostFresh)
+        {
+            state.State = "Connected";
+            state.ActiveSource = "host";
+            state.CpuPercent = state.HostCpuPercent;
+            state.RamUsedGb = state.HostRamUsedGb;
+            state.RamTotalGb = state.HostRamTotalGb;
+        }
+        else
+        {
+            state.State = "Guest nicht erreichbar";
+            state.ActiveSource = "none";
+            return;
+        }
+
+        if (!enqueueHistory)
+        {
+            return;
+        }
+
+        EnqueueHistory(state.CpuHistory, state.CpuPercent);
+        var pressure = state.RamTotalGb <= 0 ? 0 : (state.RamUsedGb / state.RamTotalGb) * 100d;
+        EnqueueHistory(state.RamPressureHistory, Math.Clamp(pressure, 0d, 100d));
+    }
+
+    private string ResolveVmNameForMonitorPacket(string rawPacketVmName, string? sourceVmId)
+    {
+        var normalizedVmId = (sourceVmId ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(normalizedVmId))
+        {
+            var byVmId = AvailableVms.FirstOrDefault(vm =>
+                !string.IsNullOrWhiteSpace(vm.VmId)
+                && string.Equals(vm.VmId, normalizedVmId, StringComparison.OrdinalIgnoreCase));
+            if (byVmId is not null)
+            {
+                return byVmId.Name;
+            }
+        }
+
         var normalized = (rawPacketVmName ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalized))
         {
@@ -5317,9 +5549,16 @@ public partial class MainViewModel : ViewModelBase
                         {
                             VmName = vm.DisplayLabel,
                             State = state.State,
+                            ActiveSource = state.ActiveSource,
                             CpuPercent = state.CpuPercent,
                             RamUsedGb = state.RamUsedGb,
                             RamTotalGb = state.RamTotalGb,
+                            GuestCpuPercent = state.LastGuestSeenUtc == DateTimeOffset.MinValue ? null : state.GuestCpuPercent,
+                            GuestRamUsedGb = state.LastGuestSeenUtc == DateTimeOffset.MinValue ? null : state.GuestRamUsedGb,
+                            GuestRamTotalGb = state.LastGuestSeenUtc == DateTimeOffset.MinValue ? null : state.GuestRamTotalGb,
+                            HostCpuPercent = state.LastHostSeenUtc == DateTimeOffset.MinValue ? null : state.HostCpuPercent,
+                            HostRamUsedGb = state.LastHostSeenUtc == DateTimeOffset.MinValue ? null : state.HostRamUsedGb,
+                            HostRamTotalGb = state.LastHostSeenUtc == DateTimeOffset.MinValue ? null : state.HostRamTotalGb,
                             RamPressurePercent = Math.Clamp(pressure, 0d, 100d),
                             CpuHistory = state.CpuHistory.ToArray(),
                             RamPressureHistory = state.RamPressureHistory.ToArray()
@@ -5340,9 +5579,16 @@ public partial class MainViewModel : ViewModelBase
                         {
                             VmName = state.VmName,
                             State = state.State,
+                            ActiveSource = state.ActiveSource,
                             CpuPercent = state.CpuPercent,
                             RamUsedGb = state.RamUsedGb,
                             RamTotalGb = state.RamTotalGb,
+                            GuestCpuPercent = state.LastGuestSeenUtc == DateTimeOffset.MinValue ? null : state.GuestCpuPercent,
+                            GuestRamUsedGb = state.LastGuestSeenUtc == DateTimeOffset.MinValue ? null : state.GuestRamUsedGb,
+                            GuestRamTotalGb = state.LastGuestSeenUtc == DateTimeOffset.MinValue ? null : state.GuestRamTotalGb,
+                            HostCpuPercent = state.LastHostSeenUtc == DateTimeOffset.MinValue ? null : state.HostCpuPercent,
+                            HostRamUsedGb = state.LastHostSeenUtc == DateTimeOffset.MinValue ? null : state.HostRamUsedGb,
+                            HostRamTotalGb = state.LastHostSeenUtc == DateTimeOffset.MinValue ? null : state.HostRamTotalGb,
                             RamPressurePercent = Math.Clamp(pressure, 0d, 100d),
                             CpuHistory = state.CpuHistory.ToArray(),
                             RamPressureHistory = state.RamPressureHistory.ToArray()
@@ -5419,11 +5665,11 @@ public partial class MainViewModel : ViewModelBase
 
                 if (!IsRunningState(vm.RuntimeState))
                 {
-                    state.State = "Guest nicht erreichbar";
+                    ApplyPreferredMonitorSource(state, isVmRunning: false, now, enqueueHistory: false);
                 }
-                else if ((now - state.LastSeenUtc) > TimeSpan.FromMilliseconds(Math.Max(_monitorIntervalMs * 3, (int)MonitorAgentTimeout.TotalMilliseconds)))
+                else
                 {
-                    state.State = "Guest nicht erreichbar";
+                    ApplyPreferredMonitorSource(state, isVmRunning: true, now, enqueueHistory: false);
                 }
             }
 

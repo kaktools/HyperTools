@@ -6,6 +6,10 @@ public interface IHyperVService
 {
     Task<IReadOnlyList<HyperVVmInfo>> GetVmsAsync(CancellationToken cancellationToken);
 
+    Task<HyperVVmInfo?> GetVmAsync(string vmName, CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<VmHostResourcePacket>> GetVmHostResourceMetricsAsync(CancellationToken cancellationToken);
+
     Task StartVmAsync(string vmName, CancellationToken cancellationToken);
 
     Task StopVmGracefulAsync(string vmName, CancellationToken cancellationToken);

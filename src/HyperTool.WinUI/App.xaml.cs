@@ -69,6 +69,8 @@ public sealed partial class App : Application
     private Task? _resourceMonitorTask;
     private readonly SystemResourceSampler _hostResourceSampler = new();
     private CancellationTokenSource? _usbEventRefreshCts;
+    private readonly SemaphoreSlim _hostUsbRefreshGate = new(1, 1);
+    private DateTimeOffset _lastHostUsbRefreshUtc = DateTimeOffset.MinValue;
     private string _lastMissingHyperVSocketServicesLogKey = string.Empty;
     private bool _hyperVSocketRegistrationPromptIssued;
     private bool _sharedFolderFileServiceSocketActive;
@@ -1955,7 +1957,7 @@ public sealed partial class App : Application
 
     private void TriggerHostUsbRefreshForDiagnosticsEvent()
     {
-        _ = RefreshHostUsbDevicesSafeAsync();
+        _ = RefreshHostUsbDevicesSafeAsync(force: false);
 
         try
         {
@@ -1974,7 +1976,7 @@ public sealed partial class App : Application
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(2), refreshToken);
-                await RefreshHostUsbDevicesSafeAsync();
+                await RefreshHostUsbDevicesSafeAsync(force: true);
             }
             catch (OperationCanceledException)
             {
@@ -1986,7 +1988,7 @@ public sealed partial class App : Application
         }, refreshToken);
     }
 
-    private async Task RefreshHostUsbDevicesSafeAsync()
+    private async Task RefreshHostUsbDevicesSafeAsync(bool force = false)
     {
         if (_mainViewModel is null
             || _isExitRequested
@@ -1995,36 +1997,57 @@ public sealed partial class App : Application
             return;
         }
 
-        if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
+        var now = DateTimeOffset.UtcNow;
+        if (!force && (now - _lastHostUsbRefreshUtc) < TimeSpan.FromMilliseconds(1200))
         {
-            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!queue.TryEnqueue(async () =>
-                {
-                    try
-                    {
-                        if (_mainViewModel is null)
-                        {
-                            completion.TrySetResult(true);
-                            return;
-                        }
-
-                        await _mainViewModel.RefreshUsbDevicesFromTrayAsync();
-                        completion.TrySetResult(true);
-                    }
-                    catch (Exception ex)
-                    {
-                        completion.TrySetException(ex);
-                    }
-                }))
-            {
-                return;
-            }
-
-            await completion.Task;
             return;
         }
 
-        await _mainViewModel.RefreshUsbDevicesFromTrayAsync();
+        if (!await _hostUsbRefreshGate.WaitAsync(0))
+        {
+            return;
+        }
+
+        try
+        {
+            if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
+            {
+                var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!queue.TryEnqueue(async () =>
+                    {
+                        try
+                        {
+                            if (_mainViewModel is null)
+                            {
+                                completion.TrySetResult(true);
+                                return;
+                            }
+
+                            await _mainViewModel.RefreshUsbDevicesFromTrayAsync();
+                            completion.TrySetResult(true);
+                        }
+                        catch (Exception ex)
+                        {
+                            completion.TrySetException(ex);
+                        }
+                    }))
+                {
+                    return;
+                }
+
+                await completion.Task;
+            }
+            else
+            {
+                await _mainViewModel.RefreshUsbDevicesFromTrayAsync();
+            }
+
+            _lastHostUsbRefreshUtc = DateTimeOffset.UtcNow;
+        }
+        finally
+        {
+            _hostUsbRefreshGate.Release();
+        }
     }
 
     private void ProcessDiagnosticsAck(HyperVSocketDiagnosticsAck ack, bool isThemeRestart)
@@ -2083,6 +2106,7 @@ public sealed partial class App : Application
                             _mainViewModel.UpdateGuestResourceMonitoring(new ResourceMonitorPacket
                             {
                                 Vm = ack.GuestComputerName,
+                                SourceVmId = ack.SourceVmId,
                                 Cpu = ack.GuestCpuPercent.Value,
                                 RamUsed = ack.GuestRamUsedGb.Value,
                                 RamTotal = ack.GuestRamTotalGb.Value,
@@ -2100,6 +2124,7 @@ public sealed partial class App : Application
                     _mainViewModel.UpdateGuestResourceMonitoring(new ResourceMonitorPacket
                     {
                         Vm = ack.GuestComputerName,
+                        SourceVmId = ack.SourceVmId,
                         Cpu = ack.GuestCpuPercent.Value,
                         RamUsed = ack.GuestRamUsedGb.Value,
                         RamTotal = ack.GuestRamTotalGb.Value,
@@ -2130,8 +2155,7 @@ public sealed partial class App : Application
         if (_mainViewModel is not null
             && (!string.IsNullOrWhiteSpace(ack.BusId) || !string.IsNullOrWhiteSpace(ack.HardwareId))
             && (string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)))
+                || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)))
         {
             TriggerHostUsbRefreshForDiagnosticsEvent();
         }
@@ -3332,6 +3356,7 @@ public sealed partial class App : Application
                 }
 
                 var (cpu, ramUsed, ramTotal) = _hostResourceSampler.Sample();
+                await _mainViewModel.RefreshHostVmResourceMonitoringAsync(token);
                 await ApplyResourceMonitorSampleAsync(cpu, ramUsed, ramTotal, token);
 
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Clamp(_mainViewModel.MonitoringIntervalMs, 500, 5000)), token);

@@ -1,5 +1,37 @@
 # HyperTool Release Notes
 
+## v2.4.7
+
+### Highlights
+
+- VM-Ressourcenmonitor arbeitet jetzt mit Dual-Quelle pro VM: Guest-Agent bevorzugt, Host-Fallback automatisch.
+- VM-Zuordnung in Diagnostics/Monitoring wurde auf `VmId` erweitert (inkl. Hyper-V-Socket-Quell-ID), wodurch Zuordnungen deutlich stabiler sind.
+- Guest-USB-Transport hat eine Self-Heal-Strategie fuer den Hyper-V-Socket-Proxy bei wiederholten Erreichbarkeitsfehlern.
+- Build-/Installer-Dokumentation auf `2.4.7` angehoben.
+
+### Verbessert
+
+- Resource-Monitor VM:
+	- Host sammelt pro VM CPU/RAM via Hyper-V (`Get-VM`) und liefert Fallback-Werte bei Guest-Aussetzern.
+	- Snapshot-Struktur fuehrt jetzt Guest- und Host-Metriken getrennt (`ActiveSource`, Guest/Host-CPU/RAM), inklusive sauberer Source-Anzeige in der UI.
+	- VM-Status-Refresh nutzt gezielte Einzel-VM-Abfrage (`GetVmAsync`) statt Voll-Refresh und vermeidet parallele Refresh-Ueberlappungen.
+- Monitoring-Zuordnung:
+	- VM-Modelle und Runtime-Pakete enthalten `VmId`, wodurch Name-only-Kollisionen reduziert werden.
+	- Socket-Listener reichern eingehende Pakete/Acks mit der tatsaechlichen Remote-VM-ID an, falls diese im Payload fehlt.
+- USB Refresh-Stabilitaet:
+	- Host und Guest nutzen Gate + kurze Drosselung gegen Event-Stuerme und redundante Parallel-Refreshes.
+	- Host triggert keinen zusaetzlichen Refresh mehr auf reine `usb-heartbeat` Events.
+
+### Behoben
+
+- VM-Monitorwerte konnten bei fehlenden Guest-Daten oder instabiler Namenszuordnung auf `nicht erreichbar` fallen, obwohl Host-Daten verfuegbar waren.
+- Wiederholte USB-Diagnoseevents konnten unnoetig viele Refreshes starten und so UI/Tray-Aktualisierung belasten.
+- Guest-Hyper-V-Socket-Proxy blieb nach mehrfachen Probe-Fehlern teils im fehlerhaften Zustand, statt sich kontrolliert zu erholen.
+
+### Doku
+
+- README auf `v2.4.7` aktualisiert (Release-Stand + Build-Beispiele + aktuelle Monitoring-/USB-Verbesserungen).
+
 ## v2.4.6
 
 ### Highlights

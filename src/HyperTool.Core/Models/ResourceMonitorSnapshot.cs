@@ -6,11 +6,25 @@ public sealed class VmResourceMonitorSnapshot
 
     public string State { get; set; } = "Guest nicht erreichbar";
 
+    public string ActiveSource { get; set; } = "none";
+
     public double CpuPercent { get; set; }
 
     public double RamUsedGb { get; set; }
 
     public double RamTotalGb { get; set; }
+
+    public double? GuestCpuPercent { get; set; }
+
+    public double? GuestRamUsedGb { get; set; }
+
+    public double? GuestRamTotalGb { get; set; }
+
+    public double? HostCpuPercent { get; set; }
+
+    public double? HostRamUsedGb { get; set; }
+
+    public double? HostRamTotalGb { get; set; }
 
     public double RamPressurePercent { get; set; }
 

@@ -52,7 +52,7 @@ public sealed class ResourceMonitorWindow : Window
 
         Title = "HyperTool Ressourcenmonitor";
         DwmWindowHelper.ApplyRoundedCorners(this);
-        DwmWindowHelper.ResizeForCurrentDpi(this, 1005, 810);
+        DwmWindowHelper.ResizeForCurrentDpi(this, 1005, 835);
         TryApplyWindowIcon();
 
         Content = BuildLayout();
@@ -429,17 +429,33 @@ public sealed class ResourceMonitorWindow : Window
         {
             stack.Children.Add(new TextBlock
             {
-                Text = "Agent verbunden",
+                Text = string.Equals(vm.ActiveSource, "host", StringComparison.OrdinalIgnoreCase)
+                    ? "Host-Fallback aktiv"
+                    : "Guest-Agent aktiv",
                 Opacity = 0.85
             });
         }
 
         if (string.Equals(vm.State, "Connected", StringComparison.OrdinalIgnoreCase))
         {
-            stack.Children.Add(new TextBlock
+            if (vm.GuestCpuPercent.HasValue && vm.GuestRamUsedGb.HasValue && vm.GuestRamTotalGb.HasValue)
             {
-                Text = $"Prozessor {vm.CpuPercent:0.#}%   Arbeitsspeicher {vm.RamUsedGb:0.0}/{vm.RamTotalGb:0.0} GB"
-            });
+                stack.Children.Add(new TextBlock
+                {
+                    Text = $"Guest: CPU {vm.GuestCpuPercent.Value:0.#}%   RAM {vm.GuestRamUsedGb.Value:0.0}/{vm.GuestRamTotalGb.Value:0.0} GB",
+                    Opacity = string.Equals(vm.ActiveSource, "guest", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.75
+                });
+            }
+
+            if (vm.HostCpuPercent.HasValue && vm.HostRamUsedGb.HasValue && vm.HostRamTotalGb.HasValue)
+            {
+                stack.Children.Add(new TextBlock
+                {
+                    Text = $"Host: CPU {vm.HostCpuPercent.Value:0.#}%   RAM {vm.HostRamUsedGb.Value:0.0}/{vm.HostRamTotalGb.Value:0.0} GB",
+                    Opacity = string.Equals(vm.ActiveSource, "host", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.75
+                });
+            }
+
             stack.Children.Add(CreatePressureBar(vm.RamPressurePercent, width: 240));
             stack.Children.Add(CreateChartCard("Prozessor-Verlauf", vm.CpuHistory ?? Array.Empty<double>(), 420, 66, Color.FromArgb(0xFF, 0x36, 0xC4, 0xFF)));
             stack.Children.Add(CreateChartCard("RAM-Auslastung", vm.RamPressureHistory ?? Array.Empty<double>(), 420, 66, Color.FromArgb(0xFF, 0xFF, 0xB3, 0x3C)));

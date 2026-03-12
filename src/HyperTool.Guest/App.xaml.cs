@@ -26,6 +26,7 @@ public sealed partial class App : Application
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
     private const int GuestUsbHeartbeatIntervalSeconds = 45;
     private static readonly TimeSpan UsbRefreshSuccessLogHeartbeatInterval = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan UsbHyperVProxyRestartBackoffInterval = TimeSpan.FromSeconds(20);
     private const int SharedFolderCatalogFetchMaxAttempts = 3;
     private static readonly TimeSpan SharedFolderCatalogReadyLogHeartbeatInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan RecurringWarnRateLimitInterval = TimeSpan.FromMinutes(2);
@@ -115,6 +116,7 @@ public sealed partial class App : Application
     private bool _usbIpFallbackActive;
     private bool _usbHyperVSocketServiceReachable;
     private int _usbHyperVSocketProbeFailureCount;
+    private DateTimeOffset _usbHyperVSocketProxyLastRestartAttemptUtc = DateTimeOffset.MinValue;
     private CancellationTokenSource? _usbDiagnosticsCts;
     private Task? _usbDiagnosticsTask;
     private CancellationTokenSource? _usbAutoRefreshCts;
@@ -124,6 +126,7 @@ public sealed partial class App : Application
     private CancellationTokenSource? _sharedFolderAutoMountCts;
     private Task? _sharedFolderAutoMountTask;
     private readonly SemaphoreSlim _usbRefreshGate = new(1, 1);
+    private DateTimeOffset _lastUsbRefreshCompletedUtc = DateTimeOffset.MinValue;
     private readonly GuestResourceMonitorAgent _resourceMonitorAgent = new();
     private readonly SystemResourceSampler _diagnosticsResourceSampler = new();
     private readonly ConcurrentDictionary<string, RateLimitedWarnState> _rateLimitedWarnStates = new(StringComparer.Ordinal);
@@ -2012,6 +2015,11 @@ public sealed partial class App : Application
 
     private async Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync(bool emitLogs)
     {
+        if (!emitLogs && (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc) < TimeSpan.FromMilliseconds(1200))
+        {
+            return _usbDevices;
+        }
+
         if (!await _usbRefreshGate.WaitAsync(0))
         {
             return _usbDevices;
@@ -2246,6 +2254,7 @@ public sealed partial class App : Application
         }
         finally
         {
+            _lastUsbRefreshCompletedUtc = DateTimeOffset.UtcNow;
             _usbRefreshGate.Release();
         }
     }
@@ -4123,6 +4132,7 @@ public sealed partial class App : Application
                     if (_usbHyperVSocketProbeFailureCount >= 3)
                     {
                         _usbHyperVSocketServiceReachable = false;
+                        TrySelfHealUsbHyperVSocketProxy();
                     }
                 }
 
@@ -4178,6 +4188,59 @@ public sealed partial class App : Application
         }
 
         return false;
+    }
+
+    private void TrySelfHealUsbHyperVSocketProxy()
+    {
+        if (_config?.Usb?.UseHyperVSocket != true)
+        {
+            return;
+        }
+
+        if (_usbHyperVSocketProxy?.IsRunning != true)
+        {
+            UpdateUsbTransportBridge();
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if ((now - _usbHyperVSocketProxyLastRestartAttemptUtc) < UsbHyperVProxyRestartBackoffInterval)
+        {
+            return;
+        }
+
+        _usbHyperVSocketProxyLastRestartAttemptUtc = now;
+
+        try
+        {
+            _usbHyperVSocketProxy.Dispose();
+
+            var serviceIdText = string.IsNullOrWhiteSpace(_config.Usb.HyperVSocketServiceId)
+                ? HyperVSocketUsbTunnelDefaults.ServiceIdString
+                : _config.Usb.HyperVSocketServiceId;
+            if (!Guid.TryParse(serviceIdText, out var serviceId))
+            {
+                return;
+            }
+
+            _usbHyperVSocketProxy = new HyperVSocketUsbGuestProxy(serviceId);
+            _usbHyperVSocketProxy.Start();
+
+            GuestLogger.Info("usb.transport.hyperv.self_heal.restart", "Hyper-V Socket Proxy wurde zur Selbstheilung neu gestartet.", new
+            {
+                serviceId = serviceId.ToString("D"),
+                failureCount = _usbHyperVSocketProbeFailureCount
+            });
+        }
+        catch (Exception ex)
+        {
+            _usbHyperVSocketProxy = null;
+            GuestLogger.Warn("usb.transport.hyperv.self_heal.failed", ex.Message, new
+            {
+                failureCount = _usbHyperVSocketProbeFailureCount,
+                exceptionType = ex.GetType().FullName
+            });
+        }
     }
 
     private async Task<(bool hyperVSocketActive, bool registryServiceOk)> RunTransportDiagnosticsTestAsync()

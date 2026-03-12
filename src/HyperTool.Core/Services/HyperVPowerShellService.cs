@@ -24,6 +24,7 @@ public sealed class HyperVPowerShellService : IHyperVService
 
                     [pscustomobject]@{
                         Name = $_.Name
+                        VmId = if ($null -ne $_.VMId) { $_.VMId.Guid } else { '' }
                         State = $_.State.ToString()
                         Status = $_.Status
                         CurrentSwitchName = if ($null -ne $adapter -and $null -ne $adapter.SwitchName) { $adapter.SwitchName } else { '' }
@@ -38,11 +39,90 @@ public sealed class HyperVPowerShellService : IHyperVService
         return rows.Select(row => new HyperVVmInfo
         {
             Name = GetString(row, "Name"),
+            VmId = GetString(row, "VmId"),
             State = GetString(row, "State"),
             Status = GetString(row, "Status"),
             CurrentSwitchName = GetString(row, "CurrentSwitchName"),
             HasMountedIso = GetBoolean(row, "HasMountedIso"),
             MountedIsoPath = GetString(row, "MountedIsoPath")
+        }).ToList();
+    }
+
+    public async Task<HyperVVmInfo?> GetVmAsync(string vmName, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(vmName))
+        {
+            throw new ArgumentException("VM-Name darf nicht leer sein.", nameof(vmName));
+        }
+
+        var script =
+            "$vmName = " + ToPsSingleQuoted(vmName) + "; " +
+            "$vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue; " +
+            "if ($null -eq $vm) { return }; " +
+            "$adapter = Get-VMNetworkAdapter -VMName $vm.Name -ErrorAction SilentlyContinue | Select-Object -First 1; " +
+            "$dvd = Get-VMDvdDrive -VMName $vm.Name -ErrorAction SilentlyContinue | Select-Object -First 1; " +
+            "$dvdPath = if ($null -ne $dvd -and -not [string]::IsNullOrWhiteSpace($dvd.Path)) { $dvd.Path } else { '' }; " +
+            "[pscustomobject]@{ " +
+            "  Name = $vm.Name; " +
+            "  VmId = if ($null -ne $vm.VMId) { $vm.VMId.Guid } else { '' }; " +
+            "  State = $vm.State.ToString(); " +
+            "  Status = $vm.Status; " +
+            "  CurrentSwitchName = if ($null -ne $adapter -and $null -ne $adapter.SwitchName) { $adapter.SwitchName } else { '' }; " +
+            "  HasMountedIso = -not [string]::IsNullOrWhiteSpace($dvdPath); " +
+            "  MountedIsoPath = $dvdPath " +
+            "} | ConvertTo-Json -Depth 4 -Compress";
+
+        var rows = await InvokeJsonArrayAsync(script, cancellationToken);
+        var row = rows.FirstOrDefault();
+        if (row.ValueKind == JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return new HyperVVmInfo
+        {
+            Name = GetString(row, "Name"),
+            VmId = GetString(row, "VmId"),
+            State = GetString(row, "State"),
+            Status = GetString(row, "Status"),
+            CurrentSwitchName = GetString(row, "CurrentSwitchName"),
+            HasMountedIso = GetBoolean(row, "HasMountedIso"),
+            MountedIsoPath = GetString(row, "MountedIsoPath")
+        };
+    }
+
+    public async Task<IReadOnlyList<VmHostResourcePacket>> GetVmHostResourceMetricsAsync(CancellationToken cancellationToken)
+    {
+        const string script = """
+            @(
+                Get-VM | ForEach-Object {
+                    $assignedGb = if ($null -ne $_.MemoryAssigned -and $_.MemoryAssigned -gt 0) { [Math]::Round(([double]$_.MemoryAssigned / 1GB), 2) } else { 0 }
+                    $startupGb = if ($null -ne $_.MemoryStartup -and $_.MemoryStartup -gt 0) { [Math]::Round(([double]$_.MemoryStartup / 1GB), 2) } else { 0 }
+                    $maximumGb = if ($_.DynamicMemoryEnabled -and $null -ne $_.MemoryMaximum -and $_.MemoryMaximum -gt 0) { [Math]::Round(([double]$_.MemoryMaximum / 1GB), 2) } else { $startupGb }
+                    $totalGb = if ($startupGb -gt 0) { $startupGb } elseif ($assignedGb -gt 0) { $assignedGb } else { $maximumGb }
+                    if ($totalGb -lt $assignedGb) { $totalGb = $assignedGb }
+
+                    [pscustomobject]@{
+                        Name = $_.Name
+                        VmId = if ($null -ne $_.VMId) { $_.VMId.Guid } else { '' }
+                        CpuPercent = [double]$_.CPUUsage
+                        RamUsedGb = [double]$assignedGb
+                        RamTotalGb = [double]$totalGb
+                        SampledAtUtc = [DateTime]::UtcNow.ToString('O')
+                    }
+                }
+            ) | ConvertTo-Json -Depth 4 -Compress
+            """;
+
+        var rows = await InvokeJsonArrayAsync(script, cancellationToken);
+        return rows.Select(row => new VmHostResourcePacket
+        {
+            VmName = GetString(row, "Name"),
+            VmId = GetString(row, "VmId"),
+            CpuPercent = GetDouble(row, "CpuPercent"),
+            RamUsedGb = GetDouble(row, "RamUsedGb"),
+            RamTotalGb = GetDouble(row, "RamTotalGb"),
+            SampledAtUtc = GetString(row, "SampledAtUtc")
         }).ToList();
     }
 
@@ -1621,6 +1701,21 @@ public sealed class HyperVPowerShellService : IHyperVService
             JsonValueKind.False => false,
             JsonValueKind.String when bool.TryParse(value.GetString(), out var parsed) => parsed,
             _ => false
+        };
+    }
+
+    private static double GetDouble(JsonElement source, string propertyName)
+    {
+        if (!source.TryGetProperty(propertyName, out var value))
+        {
+            return 0d;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetDouble(out var parsed) => parsed,
+            JsonValueKind.String when double.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) => parsed,
+            _ => 0d
         };
     }
 

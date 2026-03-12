@@ -4,6 +4,8 @@ public sealed class ResourceMonitorPacket
 {
     public string Vm { get; set; } = string.Empty;
 
+    public string SourceVmId { get; set; } = string.Empty;
+
     public double Cpu { get; set; }
 
     public double RamUsed { get; set; }

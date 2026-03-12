@@ -1,5 +1,6 @@
 using HyperTool.Models;
 using Microsoft.Win32;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -78,6 +79,7 @@ public sealed class HyperVSocketResourceMonitorHostListener : IDisposable
 
     private async Task HandleClientAsync(Socket socket, CancellationToken cancellationToken)
     {
+        var sourceVmId = TryGetRemoteVmId(socket);
         await using var stream = new NetworkStream(socket, ownsSocket: true);
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 512, leaveOpen: false);
 
@@ -101,12 +103,42 @@ public sealed class HyperVSocketResourceMonitorHostListener : IDisposable
             var packet = JsonSerializer.Deserialize<ResourceMonitorPacket>(line.Trim(), PacketJsonOptions);
             if (packet is not null)
             {
+                if (string.IsNullOrWhiteSpace(packet.SourceVmId) && !string.IsNullOrWhiteSpace(sourceVmId))
+                {
+                    packet.SourceVmId = sourceVmId;
+                }
+
                 _onPacket(packet);
             }
         }
         catch
         {
         }
+    }
+
+    private static string TryGetRemoteVmId(Socket socket)
+    {
+        try
+        {
+            if (socket.RemoteEndPoint is HyperVSocketEndPoint hyperVSocketEndPoint)
+            {
+                return hyperVSocketEndPoint.VmId.ToString("D");
+            }
+
+            if (socket.RemoteEndPoint is EndPoint remoteEndPoint)
+            {
+                var parser = new HyperVSocketEndPoint(Guid.Empty, Guid.Empty);
+                if (parser.Create(remoteEndPoint.Serialize()) is HyperVSocketEndPoint parsed)
+                {
+                    return parsed.VmId.ToString("D");
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return string.Empty;
     }
 
     private void TryRegisterServiceGuid()
