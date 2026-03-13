@@ -9,6 +9,8 @@ public sealed class HostFeatureAvailability
     public List<UsbDeviceMetadataEntry> UsbDeviceMetadata { get; set; } = [];
 
     public List<UsbDeviceHostDescriptionEntry> UsbDeviceDescriptions { get; set; } = [];
+
+    public List<UsbDeviceAttachmentEntry> UsbDeviceAttachments { get; set; } = [];
 }
 
 public sealed class UsbDeviceHostDescriptionEntry
@@ -16,6 +18,15 @@ public sealed class UsbDeviceHostDescriptionEntry
     public string DeviceKey { get; set; } = string.Empty;
 
     public string Description { get; set; } = string.Empty;
+}
+
+public sealed class UsbDeviceAttachmentEntry
+{
+    public string BusId { get; set; } = string.Empty;
+
+    public string GuestComputerName { get; set; } = string.Empty;
+
+    public string ClientIpAddress { get; set; } = string.Empty;
 }
 
 public sealed class HostIdentityInfo

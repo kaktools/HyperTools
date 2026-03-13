@@ -25,6 +25,7 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan DefaultStaleUsbAttachGracePeriod = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan LoopbackManagedUsbAttachGraceFloor = TimeSpan.FromSeconds(180);
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan GuestAckChannelHealthyWindow = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
@@ -2138,6 +2139,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var detachedCount = 0;
+        var guestAckChannelHealthy = UsbGuestConnectionRegistry.HasAnyFreshGuestConnection(GuestAckChannelHealthyWindow);
 
         foreach (var device in devices)
         {
@@ -2156,6 +2158,15 @@ public partial class MainViewModel : ViewModelBase
             var effectiveRetryAttempts = Math.Max(
                 _usbAutoDetachRetryAttempts,
                 (loopbackAttached || guestManaged) ? LoopbackManagedUsbDetachRetryFloor : 2);
+
+            // If diagnostics ACK delivery is currently unhealthy, do not progress stale-detach state.
+            // This prevents false host detaches during temporary Hyper-V socket / diagnostics outages.
+            if (!guestAckChannelHealthy)
+            {
+                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                _usbAttachedWithoutAckAttempts.Remove(busId);
+                continue;
+            }
 
             if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, effectiveGracePeriod, out _))
             {
@@ -4245,6 +4256,23 @@ public partial class MainViewModel : ViewModelBase
                 Description = pair.Value
             })
             .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    public IReadOnlyList<UsbDeviceAttachmentEntry> GetUsbDeviceAttachmentSnapshot()
+    {
+        return UsbDevices
+            .Where(device => device is not null
+                             && device.IsAttached
+                             && !string.IsNullOrWhiteSpace(device.BusId))
+            .Select(device => new UsbDeviceAttachmentEntry
+            {
+                BusId = (device.BusId ?? string.Empty).Trim(),
+                GuestComputerName = (device.AttachedGuestComputerName ?? string.Empty).Trim(),
+                ClientIpAddress = (device.ClientIpAddress ?? string.Empty).Trim()
+            })
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.BusId))
+            .OrderBy(entry => entry.BusId, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 

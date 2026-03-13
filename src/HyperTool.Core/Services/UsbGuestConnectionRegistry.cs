@@ -142,6 +142,29 @@ public static class UsbGuestConnectionRegistry
         return true;
     }
 
+    public static bool HasAnyFreshGuestConnection(TimeSpan maxAge)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var (_, entry) in ConnectedGuestsByDeviceKey)
+        {
+            if ((now - entry.LastSeenUtc) <= maxAge)
+            {
+                return true;
+            }
+        }
+
+        foreach (var (_, entry) in ConnectedGuestsByBusId)
+        {
+            if ((now - entry.LastSeenUtc) <= maxAge)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static string BuildDeviceIdentityKey(HyperVSocketDiagnosticsAck ack)
     {
         var hardwareId = NormalizeHardwareId(ack.HardwareId);

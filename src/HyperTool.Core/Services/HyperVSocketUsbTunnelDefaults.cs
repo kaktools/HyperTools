@@ -14,6 +14,8 @@ public static class HyperVSocketUsbTunnelDefaults
     public static readonly Guid FileServiceId = Guid.Parse(FileServiceIdString);
     public const string ResourceMonitorServiceIdString = "2f843a7d-6c31-4de0-9a80-72fb4a0fc7b1";
     public static readonly Guid ResourceMonitorServiceId = Guid.Parse(ResourceMonitorServiceIdString);
+    public const string UsbChangeNotificationServiceIdString = "3c7f2e1a-9b4d-4a85-8c31-f72e0d6b5941";
+    public static readonly Guid UsbChangeNotificationServiceId = Guid.Parse(UsbChangeNotificationServiceIdString);
     public static readonly Guid VmIdParent = Guid.Parse("a42e7cda-d03f-480c-9cc2-a4de20abb878");
     public static readonly Guid VmIdWildcard = Guid.Empty;
     public const int UsbIpTcpPort = 3240;

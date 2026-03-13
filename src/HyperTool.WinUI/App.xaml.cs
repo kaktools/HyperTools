@@ -29,6 +29,7 @@ namespace HyperTool.WinUI;
 public sealed partial class App : Application
 {
     private const int HostUsbAutoRefreshSeconds = 5;
+    private const int UsbDisconnectDebounceMilliseconds = 4500;
     private const string SingleInstanceMutexName = @"Local\HyperTool.WinUI.SingleInstance";
     private const string SingleInstancePipeName = "HyperTool.WinUI.SingleInstance.Activate";
     private static readonly (string ServiceId, string ElementName)[] RequiredHyperVSocketServices =
@@ -38,7 +39,8 @@ public sealed partial class App : Application
         (HyperVSocketUsbTunnelDefaults.SharedFolderCatalogServiceIdString, "HyperTool Hyper-V Socket Shared Folder Catalog"),
         (HyperVSocketUsbTunnelDefaults.HostIdentityServiceIdString, "HyperTool Hyper-V Socket Host Identity"),
         (HyperVSocketUsbTunnelDefaults.FileServiceIdString, "HyperTool Hyper-V Socket File Service"),
-        (HyperVSocketUsbTunnelDefaults.ResourceMonitorServiceIdString, "HyperTool Hyper-V Socket Resource Monitor")
+        (HyperVSocketUsbTunnelDefaults.ResourceMonitorServiceIdString, "HyperTool Hyper-V Socket Resource Monitor"),
+        (HyperVSocketUsbTunnelDefaults.UsbChangeNotificationServiceIdString, "HyperTool Hyper-V Socket USB Change Notification")
     ];
 
     private ITrayService? _trayService;
@@ -58,6 +60,8 @@ public sealed partial class App : Application
     private HyperVSocketHostIdentityHostListener? _hostIdentityHostListener;
     private HyperVSocketFileHostListener? _fileHostListener;
     private HyperVSocketResourceMonitorHostListener? _resourceMonitorHostListener;
+    private HyperVSocketUsbChangeNotificationHostListener? _usbChangeNotificationHostListener;
+    private string _lastUsbShareStateFingerprint = string.Empty;
     private CancellationTokenSource? _usbDiagnosticsCts;
     private Task? _usbDiagnosticsTask;
     private CancellationTokenSource? _usbHostDiscoveryCts;
@@ -77,6 +81,8 @@ public sealed partial class App : Application
     private bool _hyperVSocketRegistrationPromptIssued;
     private bool _sharedFolderFileServiceSocketActive;
     private DateTimeOffset? _sharedFolderFileServiceLastActivityUtc;
+    private readonly object _usbDisconnectDebounceSync = new();
+    private readonly Dictionary<string, CancellationTokenSource> _pendingUsbDisconnectDebounceByKey = new(StringComparer.OrdinalIgnoreCase);
 
     private MainWindow? _mainWindow;
     private MainViewModel? _mainViewModel;
@@ -293,6 +299,7 @@ public sealed partial class App : Application
             StartHostIdentityListenerWithRecovery();
             StartFileHostListenerWithRecovery();
             StartResourceMonitorListenerWithRecovery();
+            StartUsbChangeNotificationListenerWithRecovery();
             StartResourceMonitorLoop();
 
             _mainWindow = new MainWindow(_themeService, _mainViewModel, showStartupSplash: true);
@@ -396,6 +403,8 @@ public sealed partial class App : Application
             StopResourceMonitorLoop();
             _resourceMonitorHostListener?.Dispose();
             _resourceMonitorHostListener = null;
+            _usbChangeNotificationHostListener?.Dispose();
+            _usbChangeNotificationHostListener = null;
             _sharedFolderFileServiceSocketActive = false;
             _sharedFolderFileServiceLastActivityUtc = null;
             UpdateSharedFolderFileServiceStatusPanel();
@@ -460,6 +469,8 @@ public sealed partial class App : Application
             StopResourceMonitorLoop();
             _resourceMonitorHostListener?.Dispose();
             _resourceMonitorHostListener = null;
+            _usbChangeNotificationHostListener?.Dispose();
+            _usbChangeNotificationHostListener = null;
             _sharedFolderFileServiceSocketActive = false;
             _sharedFolderFileServiceLastActivityUtc = null;
             UpdateSharedFolderFileServiceStatusPanel();
@@ -496,6 +507,7 @@ public sealed partial class App : Application
             StartHostIdentityListenerWithRecovery(isThemeRestart: true);
             StartFileHostListenerWithRecovery(isThemeRestart: true);
             StartResourceMonitorListenerWithRecovery(isThemeRestart: true);
+            StartUsbChangeNotificationListenerWithRecovery(isThemeRestart: true);
             StartResourceMonitorLoop();
 
             try
@@ -2015,6 +2027,8 @@ public sealed partial class App : Application
 
         try
         {
+            string? newFingerprint = null;
+
             if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
             {
                 var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2029,6 +2043,7 @@ public sealed partial class App : Application
                             }
 
                             await _mainViewModel.RefreshUsbDevicesFromTrayAsync();
+                            newFingerprint = ComputeUsbShareFingerprint();
                             completion.TrySetResult(true);
                         }
                         catch (Exception ex)
@@ -2045,14 +2060,44 @@ public sealed partial class App : Application
             else
             {
                 await _mainViewModel.RefreshUsbDevicesFromTrayAsync();
+                newFingerprint = ComputeUsbShareFingerprint();
             }
 
             _lastHostUsbRefreshUtc = DateTimeOffset.UtcNow;
+
+            if (newFingerprint is not null
+                && !string.Equals(newFingerprint, _lastUsbShareStateFingerprint, StringComparison.Ordinal)
+                && _usbChangeNotificationHostListener?.SubscriberCount > 0)
+            {
+                _lastUsbShareStateFingerprint = newFingerprint;
+                Log.Debug("USB share state changed - notifying guest subscribers via push channel.");
+                _ = _usbChangeNotificationHostListener.BroadcastAsync();
+            }
+            else if (newFingerprint is not null && !string.Equals(newFingerprint, _lastUsbShareStateFingerprint, StringComparison.Ordinal))
+            {
+                _lastUsbShareStateFingerprint = newFingerprint;
+            }
         }
         finally
         {
             _hostUsbRefreshGate.Release();
         }
+    }
+
+    private string ComputeUsbShareFingerprint()
+    {
+        if (_mainViewModel is null)
+        {
+            return string.Empty;
+        }
+
+        var parts = _mainViewModel.UsbDevices
+            .Where(d => !string.IsNullOrWhiteSpace(d.BusId))
+            .OrderBy(d => d.BusId, StringComparer.OrdinalIgnoreCase)
+            .Select(d => $"{d.BusId}:{d.IsShared}:{d.IsAttached}")
+            .ToArray();
+
+        return string.Join("|", parts);
     }
 
     private void ProcessDiagnosticsAck(HyperVSocketDiagnosticsAck ack, bool isThemeRestart)
@@ -2147,14 +2192,14 @@ public sealed partial class App : Application
             && (!string.IsNullOrWhiteSpace(ack.BusId) || !string.IsNullOrWhiteSpace(ack.HardwareId))
             && string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
         {
-            if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
-            {
-                _ = queue.TryEnqueue(() => _ = HandleUsbClientDisconnectEventAsync(ack.BusId, ack.HardwareId));
-            }
-            else
-            {
-                _ = HandleUsbClientDisconnectEventAsync(ack.BusId, ack.HardwareId);
-            }
+            ScheduleUsbClientDisconnectEvent(ack.BusId, ack.HardwareId);
+        }
+
+        if (_mainViewModel is not null
+            && (!string.IsNullOrWhiteSpace(ack.BusId) || !string.IsNullOrWhiteSpace(ack.HardwareId))
+            && string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase))
+        {
+            CancelPendingUsbClientDisconnectEvent(ack.BusId, ack.HardwareId);
         }
 
         if (_mainViewModel is not null
@@ -2188,6 +2233,141 @@ public sealed partial class App : Application
                 _usbHostTunnel?.IsRunning == true,
                 HyperVSocketUsbHostTunnel.IsServiceRegistered());
         }
+    }
+
+    private void ScheduleUsbClientDisconnectEvent(string? busId, string? hardwareId)
+    {
+        var correlationKey = BuildUsbDisconnectCorrelationKey(busId, hardwareId);
+        if (string.IsNullOrWhiteSpace(correlationKey))
+        {
+            _ = HandleUsbClientDisconnectEventAsync(busId, hardwareId);
+            return;
+        }
+
+        CancellationTokenSource? previousCts = null;
+        var cts = new CancellationTokenSource();
+
+        lock (_usbDisconnectDebounceSync)
+        {
+            if (_pendingUsbDisconnectDebounceByKey.TryGetValue(correlationKey, out previousCts))
+            {
+                _pendingUsbDisconnectDebounceByKey[correlationKey] = cts;
+            }
+            else
+            {
+                _pendingUsbDisconnectDebounceByKey.Add(correlationKey, cts);
+            }
+        }
+
+        if (previousCts is not null)
+        {
+            try
+            {
+                previousCts.Cancel();
+            }
+            catch
+            {
+            }
+            finally
+            {
+                previousCts.Dispose();
+            }
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(UsbDisconnectDebounceMilliseconds, cts.Token);
+                if (!cts.IsCancellationRequested)
+                {
+                    await HandleUsbClientDisconnectEventAsync(busId, hardwareId);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "USB disconnect debounce worker failed. BusId={BusId}; HardwareId={HardwareId}", busId, hardwareId);
+            }
+            finally
+            {
+                lock (_usbDisconnectDebounceSync)
+                {
+                    if (_pendingUsbDisconnectDebounceByKey.TryGetValue(correlationKey, out var current)
+                        && ReferenceEquals(current, cts))
+                    {
+                        _pendingUsbDisconnectDebounceByKey.Remove(correlationKey);
+                    }
+                }
+
+                cts.Dispose();
+            }
+        });
+    }
+
+    private void CancelPendingUsbClientDisconnectEvent(string? busId, string? hardwareId)
+    {
+        var correlationKey = BuildUsbDisconnectCorrelationKey(busId, hardwareId);
+        if (string.IsNullOrWhiteSpace(correlationKey))
+        {
+            return;
+        }
+
+        CancellationTokenSource? cts = null;
+        lock (_usbDisconnectDebounceSync)
+        {
+            if (_pendingUsbDisconnectDebounceByKey.TryGetValue(correlationKey, out cts))
+            {
+                _pendingUsbDisconnectDebounceByKey.Remove(correlationKey);
+            }
+        }
+
+        if (cts is null)
+        {
+            return;
+        }
+
+        try
+        {
+            cts.Cancel();
+            Log.Debug("Cancelled pending auto-detach after quick USB reconnect. BusId={BusId}; HardwareId={HardwareId}", busId, hardwareId);
+        }
+        catch
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+
+    private static string BuildUsbDisconnectCorrelationKey(string? busId, string? hardwareId)
+    {
+        if (!string.IsNullOrWhiteSpace(busId))
+        {
+            return "bus:" + busId.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return "hw:" + NormalizeUsbHardwareIdForCorrelation(hardwareId);
+        }
+
+        return string.Empty;
+    }
+
+    private static string NormalizeUsbHardwareIdForCorrelation(string hardwareId)
+    {
+        var normalized = hardwareId.Trim();
+        if (normalized.StartsWith("USB\\", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized.Substring(4);
+        }
+
+        normalized = normalized.Replace('\\', ':');
+        return normalized.ToUpperInvariant();
     }
 
     private async Task HandleUsbClientDisconnectEventAsync(string? busId, string? hardwareId)
@@ -3114,7 +3294,8 @@ public sealed partial class App : Application
                 featureAvailabilityProvider: () => new HyperTool.Models.HostFeatureAvailability
                 {
                     UsbSharingEnabled = _mainViewModel?.HostUsbSharingEnabled ?? true,
-                    SharedFoldersEnabled = _mainViewModel?.HostSharedFoldersEnabled ?? true
+                    SharedFoldersEnabled = _mainViewModel?.HostSharedFoldersEnabled ?? true,
+                    UsbDeviceAttachments = _mainViewModel?.GetUsbDeviceAttachmentSnapshot().ToList() ?? []
                 },
                 usbMetadataProvider: () => _mainViewModel?.GetUsbDeviceMetadataSnapshot() ?? [],
                 usbDescriptionProvider: () => _mainViewModel?.GetUsbDeviceDescriptionSnapshot() ?? []);
@@ -3150,7 +3331,8 @@ public sealed partial class App : Application
                 featureAvailabilityProvider: () => new HyperTool.Models.HostFeatureAvailability
                 {
                     UsbSharingEnabled = _mainViewModel?.HostUsbSharingEnabled ?? true,
-                    SharedFoldersEnabled = _mainViewModel?.HostSharedFoldersEnabled ?? true
+                    SharedFoldersEnabled = _mainViewModel?.HostSharedFoldersEnabled ?? true,
+                    UsbDeviceAttachments = _mainViewModel?.GetUsbDeviceAttachmentSnapshot().ToList() ?? []
                 },
                 usbMetadataProvider: () => _mainViewModel?.GetUsbDeviceMetadataSnapshot() ?? [],
                 usbDescriptionProvider: () => _mainViewModel?.GetUsbDeviceDescriptionSnapshot() ?? []);
@@ -3254,6 +3436,26 @@ public sealed partial class App : Application
             Log.Warning(ex, isThemeRestart
                 ? "Hyper-V socket resource monitor listener could not be restarted after theme change."
                 : "Hyper-V socket resource monitor listener could not be started.");
+        }
+    }
+
+    private void StartUsbChangeNotificationListenerWithRecovery(bool isThemeRestart = false)
+    {
+        try
+        {
+            _usbChangeNotificationHostListener = new HyperVSocketUsbChangeNotificationHostListener();
+            _usbChangeNotificationHostListener.Start();
+            Log.Information(isThemeRestart
+                ? "Hyper-V socket USB change-notification listener restarted after theme change."
+                : "Hyper-V socket USB change-notification listener started.");
+        }
+        catch (Exception ex)
+        {
+            _usbChangeNotificationHostListener?.Dispose();
+            _usbChangeNotificationHostListener = null;
+            Log.Warning(ex, isThemeRestart
+                ? "Hyper-V socket USB change-notification listener could not be restarted after theme change."
+                : "Hyper-V socket USB change-notification listener could not be started.");
         }
     }
 

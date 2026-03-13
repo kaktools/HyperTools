@@ -5506,7 +5506,7 @@ public sealed class MainWindow : Window
                     new TextBlock
                     {
                         Text = settings.DynamicMemoryEnabled
-                            ? "Hinweis: Dynamischer Speicher ist aktiv. Geaendert wird der Startup-Wert."
+                            ? "Hinweis: Dynamischer Speicher ist aktiv. Geändert wird der Startup-Wert."
                             : "Hinweis: Es wird der feste Startup-RAM-Wert der VM gesetzt.",
                         Foreground = mutedTextBrush,
                         TextWrapping = TextWrapping.Wrap
@@ -5528,7 +5528,7 @@ public sealed class MainWindow : Window
         content.Children.Add(ramCard);
         content.Children.Add(new TextBlock
         {
-            Text = "Tipp: Enter im Number-Feld oder Sliderbewegung aktualisiert den Zielwert. Gespeichert wird erst mit 'Uebernehmen'.",
+            Text = "Tipp: Enter im Number-Feld oder Sliderbewegung aktualisiert den Zielwert. Gespeichert wird erst mit 'Übernehmen'.",
             Foreground = mutedTextBrush,
             FontSize = 12,
             TextWrapping = TextWrapping.Wrap
@@ -6420,7 +6420,7 @@ public sealed class MainWindow : Window
             $"$lnk.Arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"Start-VM -Name ''' + '{vmName.Replace("'", "''")}' + ''' -Confirm:$false\"'; " +
             "$lnk.WorkingDirectory=$env:SystemRoot; " +
             "$lnk.IconLocation=$env:SystemRoot + '\\\\System32\\\\shell32.dll,25'; " +
-            $"$lnk.Description='HyperTool Schnellstart fuer VM {displayLabel.Replace("'", "''")}'; " +
+            $"$lnk.Description='HyperTool Schnellstart für VM {displayLabel.Replace("'", "''")}'; " +
             "$lnk.Save();";
 
         var psi = new ProcessStartInfo
@@ -6456,11 +6456,11 @@ public sealed class MainWindow : Window
                     : stdErr.Trim());
             }
 
-            _viewModel.PublishNotification($"Schnellstart-Verknuepfung erstellt: {shortcutPath}", "Success");
+            _viewModel.PublishNotification($"Schnellstart-Verknüpfung erstellt: {shortcutPath}", "Success");
         }
         catch (Exception ex)
         {
-            _viewModel.PublishNotification($"Schnellstart-Verknuepfung konnte nicht erstellt werden: {ex.Message}", "Error");
+            _viewModel.PublishNotification($"Schnellstart-Verknüpfung konnte nicht erstellt werden: {ex.Message}", "Error");
         }
     }
 

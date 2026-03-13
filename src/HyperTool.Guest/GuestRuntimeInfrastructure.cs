@@ -1,4 +1,5 @@
 using HyperTool.Services;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text;
 
@@ -10,7 +11,8 @@ internal static class GuestLogger
     private static readonly TimeSpan LogRetentionPeriod = TimeSpan.FromDays(3);
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
     private static string _logFilePath = string.Empty;
