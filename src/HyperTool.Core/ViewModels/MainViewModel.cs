@@ -23,10 +23,12 @@ public partial class MainViewModel : ViewModelBase
     private const uint KeyeventfExtendedKey = 0x0001;
     private const uint KeyeventfKeyUp = 0x0002;
     private static readonly TimeSpan DefaultStaleUsbAttachGracePeriod = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan LoopbackManagedUsbAttachGraceFloor = TimeSpan.FromSeconds(180);
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
+    private const int LoopbackManagedUsbDetachRetryFloor = 20;
     private static readonly TimeSpan MonitorAgentTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan HostMonitorTimeout = TimeSpan.FromSeconds(8);
 
@@ -2110,8 +2112,6 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task<int> TryDetachStaleAttachedDevicesWithoutGuestAckAsync(IReadOnlyList<UsbIpDeviceInfo> devices, CancellationToken token)
     {
-        var effectiveRetryAttempts = Math.Max(_usbAutoDetachRetryAttempts, 2);
-
         if (devices.Count == 0)
         {
             _usbAttachedWithoutAckSinceUtc.Clear();
@@ -2150,8 +2150,14 @@ public partial class MainViewModel : ViewModelBase
             var forceDetachFallback = _usbForceDetachFallbackBusIds.Contains(busId);
             var loopbackAttached = string.Equals(device.ClientIpAddress?.Trim(), HyperVSocketUsbTunnelDefaults.LoopbackAddress, StringComparison.OrdinalIgnoreCase);
             var guestManaged = _usbGuestManagedBusIds.Contains(busId);
+            var effectiveGracePeriod = (loopbackAttached || guestManaged)
+                ? TimeSpan.FromSeconds(Math.Max((int)Math.Round(_usbAutoDetachGracePeriod.TotalSeconds), (int)Math.Round(LoopbackManagedUsbAttachGraceFloor.TotalSeconds)))
+                : _usbAutoDetachGracePeriod;
+            var effectiveRetryAttempts = Math.Max(
+                _usbAutoDetachRetryAttempts,
+                (loopbackAttached || guestManaged) ? LoopbackManagedUsbDetachRetryFloor : 2);
 
-            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, _usbAutoDetachGracePeriod, out _))
+            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, effectiveGracePeriod, out _))
             {
                 _usbGuestManagedBusIds.Add(busId);
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
@@ -2160,21 +2166,22 @@ public partial class MainViewModel : ViewModelBase
                 continue;
             }
 
-            // If diagnostics ACK delivery is disrupted, stale attached devices must still be
-            // recoverable via grace-period + retry detach (independent of loopback IP).
-            if (!forceDetachFallback && !loopbackAttached && !guestManaged)
-            {
-                Log.Debug("Tracking attached USB without guest ACK context. BusId={BusId}; ClientIp={ClientIp}", busId, device.ClientIpAddress);
-            }
-
             if (!_usbAttachedWithoutAckSinceUtc.TryGetValue(busId, out var firstSeenUtc))
             {
                 _usbAttachedWithoutAckSinceUtc[busId] = now;
                 _usbAttachedWithoutAckAttempts[busId] = 0;
+
+                // If diagnostics ACK delivery is disrupted, stale attached devices must still be
+                // recoverable via grace-period + retry detach (independent of loopback IP).
+                if (!forceDetachFallback && !loopbackAttached && !guestManaged)
+                {
+                    Log.Debug("Tracking attached USB without guest ACK context. BusId={BusId}; ClientIp={ClientIp}", busId, device.ClientIpAddress);
+                }
+
                 continue;
             }
 
-            if ((now - firstSeenUtc) < _usbAutoDetachGracePeriod)
+            if ((now - firstSeenUtc) < effectiveGracePeriod)
             {
                 continue;
             }
@@ -2190,18 +2197,22 @@ public partial class MainViewModel : ViewModelBase
 
             if (attemptCount < effectiveRetryAttempts)
             {
-                Log.Debug(
-                    "Stale attached USB still missing guest ack. BusId={BusId}, Attempt={Attempt}/{MaxAttempts}",
-                    busId,
-                    attemptCount,
-                    effectiveRetryAttempts);
+                if (attemptCount == 1 || attemptCount == effectiveRetryAttempts - 1)
+                {
+                    Log.Debug(
+                        "Stale attached USB still missing guest ack. BusId={BusId}, Attempt={Attempt}/{MaxAttempts}",
+                        busId,
+                        attemptCount,
+                        effectiveRetryAttempts);
+                }
+
                 continue;
             }
 
             // Last chance before detach: wait briefly and re-check fresh guest ACK.
             await Task.Delay(StaleUsbAttachFinalRecheckDelay, token);
 
-            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, _usbAutoDetachGracePeriod, out _))
+            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, effectiveGracePeriod, out _))
             {
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
                 _usbAttachedWithoutAckAttempts.Remove(busId);

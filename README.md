@@ -4,13 +4,13 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.4.7**
-- Ressourcenmonitor fuer VMs nutzt jetzt eine robuste Dual-Quelle: Guest-Agent bevorzugt, Host-Fallback automatisch aktiv.
-- VM-Zuordnung im Monitoring wurde auf `VmId` erweitert (inkl. Hyper-V-Socket-Quelle), wodurch Werte bei gleichnamigen/umbenannten VMs stabil bleiben.
-- Host sammelt pro VM CPU/RAM direkt ueber Hyper-V als Fallback, falls Guest-Daten aussetzen.
-- Guest USB-Transport hat eine Self-Heal-Logik fuer den Hyper-V-Socket-Proxy (mit Backoff) bei wiederholten Probe-Fehlern.
-- Host- und Guest-USB-Refresh wurden gegen Event-Stuerme gedrosselt und per Gate gegen parallele Refreshes gehaertet.
-- Der VM-Status-Refresh wurde auf gezielte Einzel-VM-Abfrage umgestellt, um Ueberlappungen und Flackern zu reduzieren.
+- Version: **v2.4.8**
+- USB-Dongle-Share wurde fuer produktive Nutzung weiter gehaertet (Guest/Host), inklusive konservativerem Verhalten bei Transportstoerungen.
+- Guest behandelt `already exported` jetzt sauberer: Heartbeat nur bei tatsaechlich erkanntem Attach, damit stale Exports auf dem Host korrekt bereinigt werden koennen.
+- Hyper-V-Socket Self-Heal im Guest ist weniger aggressiv (hoeherer Schwellwert, laengeres Backoff) und wird bei aktiv attached USB bewusst ausgesetzt.
+- Guest-USB-Auto-Refresh wurde adaptiv optimiert (weniger Hintergrundlast bei verbundenem Dongle, weniger Debug-Log-Spam bei stillen Polling-Zyklen).
+- Host Resource-Monitoring ist UI-thread-sicher gehaertet (Fix fuer COMException `0x8001010E`), inkl. robusterem Failure-Handling und rate-limitiertem Logging.
+- Host stale-auto-detach fuer guest-gemanagte/loopback-nahe Attachments wurde konservativer abgestimmt, um transiente ACK-Luecken besser zu tolerieren.
 
 ## Projekte
 
@@ -115,23 +115,23 @@ Legacy-Hinweis für Guestx86:
 ### Host
 
 - build-host.bat
-- build-installer-host.bat version=2.4.7
+- build-installer-host.bat version=2.4.8
 
 ### Guest
 
 - build-guest.bat
-- build-installer-guest.bat version=2.4.7
+- build-installer-guest.bat version=2.4.8
 
 ### Guestx86 (Legacy WPF)
 
 - build-guestx86.bat
 - build_guestx86.bat
-- build_installer_guestx86.bat version=2.4.7
+- build_installer_guestx86.bat version=2.4.8
 
 ### Komplett
 
 - build-all.bat
-- build-all.bat version=2.4.7 host guest host-installer guest-installer no-pause
+- build-all.bat version=2.4.8 host guest host-installer guest-installer no-pause
 
 Ausgaben:
 

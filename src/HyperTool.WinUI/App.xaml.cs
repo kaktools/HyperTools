@@ -70,6 +70,9 @@ public sealed partial class App : Application
     private CancellationTokenSource? _usbEventRefreshCts;
     private readonly SemaphoreSlim _hostUsbRefreshGate = new(1, 1);
     private DateTimeOffset _lastHostUsbRefreshUtc = DateTimeOffset.MinValue;
+    private static readonly TimeSpan ResourceMonitorFailureLogInterval = TimeSpan.FromMinutes(1);
+    private DateTimeOffset _resourceMonitorLoopLastFailureLogUtc = DateTimeOffset.MinValue;
+    private int _resourceMonitorLoopSuppressedFailures;
     private string _lastMissingHyperVSocketServicesLogKey = string.Empty;
     private bool _hyperVSocketRegistrationPromptIssued;
     private bool _sharedFolderFileServiceSocketActive;
@@ -3237,7 +3240,7 @@ public sealed partial class App : Application
         {
             _resourceMonitorHostListener = new HyperVSocketResourceMonitorHostListener(packet =>
             {
-                _mainViewModel.UpdateGuestResourceMonitoring(packet);
+                _ = DispatchGuestResourceMonitoringAsync(packet);
             });
             _resourceMonitorHostListener.Start();
             Log.Information(isThemeRestart
@@ -3300,9 +3303,31 @@ public sealed partial class App : Application
                     continue;
                 }
 
-                var (cpu, ramUsed, ramTotal) = _hostResourceSampler.Sample();
-                await _mainViewModel.RefreshHostVmResourceMonitoringAsync(token);
-                await ApplyResourceMonitorSampleAsync(cpu, ramUsed, ramTotal, token);
+                double cpu;
+                double ramUsed;
+                double ramTotal;
+
+                try
+                {
+                    (cpu, ramUsed, ramTotal) = _hostResourceSampler.Sample();
+                }
+                catch (Exception ex)
+                {
+                    LogResourceMonitorLoopFailure(ex);
+                    await Task.Delay(TimeSpan.FromSeconds(2), token);
+                    continue;
+                }
+
+                await DispatchHostVmResourceMonitoringRefreshAsync(token);
+
+                try
+                {
+                    await ApplyResourceMonitorSampleAsync(cpu, ramUsed, ramTotal, token);
+                }
+                catch (Exception ex)
+                {
+                    LogResourceMonitorLoopFailure(ex);
+                }
 
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Clamp(_mainViewModel.MonitoringIntervalMs, 500, 5000)), token);
             }
@@ -3310,9 +3335,9 @@ public sealed partial class App : Application
             {
                 break;
             }
-            catch
+            catch (Exception ex)
             {
-                Log.Debug("Resource monitor loop cycle failed; retry scheduled.");
+                LogResourceMonitorLoopFailure(ex);
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(2), token);
@@ -3323,6 +3348,100 @@ public sealed partial class App : Application
                 }
             }
         }
+    }
+
+    private async Task DispatchHostVmResourceMonitoringRefreshAsync(CancellationToken token)
+    {
+        if (_mainViewModel is null)
+        {
+            return;
+        }
+
+        var uiQueue = _mainWindow?.DispatcherQueue;
+        if (uiQueue is null || uiQueue.HasThreadAccess)
+        {
+            await _mainViewModel.RefreshHostVmResourceMonitoringAsync(token);
+            return;
+        }
+
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!uiQueue.TryEnqueue(async () =>
+        {
+            try
+            {
+                await _mainViewModel.RefreshHostVmResourceMonitoringAsync(token);
+                tcs.TrySetResult(true);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        }))
+        {
+            await _mainViewModel.RefreshHostVmResourceMonitoringAsync(token);
+            return;
+        }
+
+        await tcs.Task.WaitAsync(token);
+    }
+
+    private async Task DispatchGuestResourceMonitoringAsync(ResourceMonitorPacket packet)
+    {
+        if (_mainViewModel is null)
+        {
+            return;
+        }
+
+        var uiQueue = _mainWindow?.DispatcherQueue;
+        if (uiQueue is null || uiQueue.HasThreadAccess)
+        {
+            _mainViewModel.UpdateGuestResourceMonitoring(packet);
+            return;
+        }
+
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!uiQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                _mainViewModel.UpdateGuestResourceMonitoring(packet);
+                tcs.TrySetResult(true);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        }))
+        {
+            _mainViewModel.UpdateGuestResourceMonitoring(packet);
+            return;
+        }
+
+        await tcs.Task;
+    }
+
+    private void LogResourceMonitorLoopFailure(Exception ex)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if ((now - _resourceMonitorLoopLastFailureLogUtc) >= ResourceMonitorFailureLogInterval)
+        {
+            var suppressed = _resourceMonitorLoopSuppressedFailures;
+            _resourceMonitorLoopSuppressedFailures = 0;
+            _resourceMonitorLoopLastFailureLogUtc = now;
+
+            if (suppressed > 0)
+            {
+                Log.Warning(ex, "Resource monitor loop cycle failed; retry scheduled. SuppressedFailures={SuppressedFailures}", suppressed);
+            }
+            else
+            {
+                Log.Warning(ex, "Resource monitor loop cycle failed; retry scheduled.");
+            }
+
+            return;
+        }
+
+        _resourceMonitorLoopSuppressedFailures++;
     }
 
     private async Task ApplyResourceMonitorSampleAsync(double cpu, double ramUsed, double ramTotal, CancellationToken token)

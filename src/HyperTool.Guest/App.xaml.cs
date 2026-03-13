@@ -22,11 +22,15 @@ namespace HyperTool.Guest;
 
 public sealed partial class App : Application
 {
-    private const int GuestUsbAutoRefreshSeconds = 4;
+    private const int GuestUsbAutoRefreshFastSeconds = 4;
+    private const int GuestUsbAutoRefreshSlowSeconds = 10;
+    private const int GuestUsbAttachedBackgroundRefreshSeconds = 30;
+    private const int GuestHostIdentityBackgroundRefreshSeconds = 30;
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
     private const int GuestUsbHeartbeatIntervalSeconds = 45;
     private static readonly TimeSpan UsbRefreshSuccessLogHeartbeatInterval = TimeSpan.FromSeconds(45);
-    private static readonly TimeSpan UsbHyperVProxyRestartBackoffInterval = TimeSpan.FromSeconds(20);
+    private const int UsbHyperVProbeFailureThresholdBeforeRestart = 12;
+    private static readonly TimeSpan UsbHyperVProxyRestartBackoffInterval = TimeSpan.FromSeconds(90);
     private const int SharedFolderCatalogFetchMaxAttempts = 3;
     private static readonly TimeSpan SharedFolderCatalogReadyLogHeartbeatInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan RecurringWarnRateLimitInterval = TimeSpan.FromMinutes(2);
@@ -136,6 +140,8 @@ public sealed partial class App : Application
     private string _sharedFolderCatalogReadyLastStateKey = string.Empty;
     private DateTimeOffset? _usbRefreshSuccessLastLoggedUtc;
     private string _usbRefreshSuccessLastStateKey = string.Empty;
+    private DateTimeOffset _lastUsbBackgroundRefreshAttemptUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastHostIdentityBackgroundAttemptUtc = DateTimeOffset.MinValue;
 
     private sealed class RateLimitedWarnState
     {
@@ -2053,16 +2059,22 @@ public sealed partial class App : Application
     {
         if (!emitLogs && (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc) < TimeSpan.FromMilliseconds(1200))
         {
-            GuestLogger.Debug("usb.refresh.skipped_rate_limit", "USB-Refresh wegen Rate-Limit übersprungen.", new
+            if (emitLogs)
             {
-                elapsedSinceLastRefreshMs = (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc).TotalMilliseconds
-            });
+                GuestLogger.Debug("usb.refresh.skipped_rate_limit", "USB-Refresh wegen Rate-Limit übersprungen.", new
+                {
+                    elapsedSinceLastRefreshMs = (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc).TotalMilliseconds
+                });
+            }
             return _usbDevices;
         }
 
         if (!await _usbRefreshGate.WaitAsync(0))
         {
-            GuestLogger.Debug("usb.refresh.skipped_busy", "USB-Refresh übersprungen, weil bereits ein Lauf aktiv ist.");
+            if (emitLogs)
+            {
+                GuestLogger.Debug("usb.refresh.skipped_busy", "USB-Refresh übersprungen, weil bereits ein Lauf aktiv ist.");
+            }
             return _usbDevices;
         }
 
@@ -2070,14 +2082,17 @@ public sealed partial class App : Application
         {
         await RefreshUsbClientAvailabilityAsync();
 
-        GuestLogger.Debug("usb.refresh.begin", "USB-Refresh gestartet.", new
+        if (emitLogs)
         {
-            emitLogs,
-            currentCount = _usbDevices.Count,
-            selectedBusId = _selectedUsbBusId,
-            useHyperVSocket = _config?.Usb?.UseHyperVSocket != false,
-            hostFeatureEnabled = _config?.Usb?.HostFeatureEnabled != false
-        });
+            GuestLogger.Debug("usb.refresh.begin", "USB-Refresh gestartet.", new
+            {
+                emitLogs,
+                currentCount = _usbDevices.Count,
+                selectedBusId = _selectedUsbBusId,
+                useHyperVSocket = _config?.Usb?.UseHyperVSocket != false,
+                hostFeatureEnabled = _config?.Usb?.HostFeatureEnabled != false
+            });
+        }
 
         if (_config?.Usb?.Enabled == false)
         {
@@ -2135,13 +2150,16 @@ public sealed partial class App : Application
         var stopwatch = Stopwatch.StartNew();
         var hostResolution = ResolveUsbHostAddressDiagnostics();
 
-        GuestLogger.Debug("usb.refresh.host_resolution", "USB-Host-Aufloesung abgeschlossen.", new
+        if (emitLogs)
         {
-            operationId,
-            hostResolution.ResolvedIpv4,
-            hostResolution.Source,
-            hostResolution.RawInput
-        });
+            GuestLogger.Debug("usb.refresh.host_resolution", "USB-Host-Aufloesung abgeschlossen.", new
+            {
+                operationId,
+                hostResolution.ResolvedIpv4,
+                hostResolution.Source,
+                hostResolution.RawInput
+            });
+        }
 
         ApplyUsbTransportResolution(hostResolution);
         var previousCount = _usbDevices.Count;
@@ -2509,8 +2527,6 @@ public sealed partial class App : Application
 
             if (IsUsbAlreadyExportedError(ex))
             {
-                await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
-
                 try
                 {
                     await RefreshUsbDevicesAsync(emitLogs: false);
@@ -2522,6 +2538,8 @@ public sealed partial class App : Application
                 var currentDevice = FindUsbByBusId(busId);
                 if (currentDevice?.IsAttached == true)
                 {
+                    await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
+
                     _selectedUsbBusId = busId;
                     ApplyUsbTransportResolution(hostResolution);
 
@@ -2540,6 +2558,26 @@ public sealed partial class App : Application
 
                     return 0;
                 }
+
+                WarnRateLimited(
+                    eventName: "usb.connect.already_exported.not_attached",
+                    message: "Host meldet 'already exported', aber Gerät ist im Guest nicht als Attached sichtbar (stale Export wahrscheinlich).",
+                    data: new
+                    {
+                        operationId,
+                        busId,
+                        elapsedMs = stopwatch.ElapsedMilliseconds,
+                        hostAddress = hostResolution.ResolvedIpv4,
+                        hostSource = hostResolution.Source,
+                        transportPath = string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase)
+                            ? "hyperv"
+                            : "ip-fallback",
+                        beforeState = beforeDevice?.StateText,
+                        currentState = currentDevice?.StateText,
+                        currentClientIp = currentDevice?.ClientIpAddress
+                    },
+                    scopeKey: busId.Trim().ToLowerInvariant(),
+                    minInterval: RecurringWarnRateLimitInterval);
             }
 
             if (ShouldRetryUsbAttach(ex))
@@ -3351,20 +3389,29 @@ public sealed partial class App : Application
         {
             try
             {
+                var hasAttachedDevice = HasAttachedUsbDevice();
+
                 if (!_isExitRequested && _config?.Usb?.Enabled != false)
                 {
                     var wasHostUsbEnabled = _config?.Usb?.HostFeatureEnabled != false;
+                    var shouldRefreshHostIdentity = !hasAttachedDevice
+                        || (DateTimeOffset.UtcNow - _lastHostIdentityBackgroundAttemptUtc) >= TimeSpan.FromSeconds(GuestHostIdentityBackgroundRefreshSeconds);
 
-                    try
+                    if (shouldRefreshHostIdentity)
                     {
-                        var identity = await FetchHostIdentityViaHyperVSocketAsync(cancellationToken);
-                        if (identity is not null)
+                        _lastHostIdentityBackgroundAttemptUtc = DateTimeOffset.UtcNow;
+
+                        try
                         {
-                            ApplyHostIdentityToConfig(identity, persistConfig: false);
+                            var identity = await FetchHostIdentityViaHyperVSocketAsync(cancellationToken);
+                            if (identity is not null)
+                            {
+                                ApplyHostIdentityToConfig(identity, persistConfig: false);
+                            }
                         }
-                    }
-                    catch
-                    {
+                        catch
+                        {
+                        }
                     }
 
                     var isHostUsbEnabled = _config?.Usb?.HostFeatureEnabled != false;
@@ -3376,7 +3423,14 @@ public sealed partial class App : Application
 
                 if (!_isExitRequested && _isUsbClientAvailable && _config?.Usb?.Enabled != false && HasConfiguredUsbAutoConnect())
                 {
-                    await RefreshUsbDevicesAsync(emitLogs: false);
+                    var shouldRunBackgroundUsbRefresh = !hasAttachedDevice
+                        || (DateTimeOffset.UtcNow - _lastUsbBackgroundRefreshAttemptUtc) >= TimeSpan.FromSeconds(GuestUsbAttachedBackgroundRefreshSeconds);
+
+                    if (shouldRunBackgroundUsbRefresh)
+                    {
+                        _lastUsbBackgroundRefreshAttemptUtc = DateTimeOffset.UtcNow;
+                        await RefreshUsbDevicesAsync(emitLogs: false);
+                    }
                 }
 
                 if (!_isExitRequested && _config?.Usb?.Enabled != false)
@@ -3390,13 +3444,36 @@ public sealed partial class App : Application
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(GuestUsbAutoRefreshSeconds), cancellationToken);
+                await Task.Delay(TimeSpan.FromSeconds(GetUsbAutoRefreshIntervalSeconds()), cancellationToken);
             }
             catch (OperationCanceledException)
             {
                 break;
             }
         }
+    }
+
+    private int GetUsbAutoRefreshIntervalSeconds()
+    {
+        if (_config?.Usb?.Enabled == false || !_isUsbClientAvailable)
+        {
+            return GuestUsbAutoRefreshSlowSeconds;
+        }
+
+        if (!HasConfiguredUsbAutoConnect())
+        {
+            return GuestUsbAutoRefreshSlowSeconds;
+        }
+
+        var hasAttachedDevice = HasAttachedUsbDevice();
+        return hasAttachedDevice
+            ? GuestUsbAutoRefreshSlowSeconds
+            : GuestUsbAutoRefreshFastSeconds;
+    }
+
+    private bool HasAttachedUsbDevice()
+    {
+        return _usbDevices.Any(device => device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId));
     }
 
     private void StartSharedFolderAutoMountLoop()
@@ -4187,7 +4264,7 @@ public sealed partial class App : Application
                 else
                 {
                     _usbHyperVSocketProbeFailureCount++;
-                    if (_usbHyperVSocketProbeFailureCount >= 3)
+                    if (_usbHyperVSocketProbeFailureCount >= UsbHyperVProbeFailureThresholdBeforeRestart)
                     {
                         _usbHyperVSocketServiceReachable = false;
                         TrySelfHealUsbHyperVSocketProxy();
@@ -4261,6 +4338,29 @@ public sealed partial class App : Application
             return;
         }
 
+        var attachedBusIds = _usbDevices
+            .Where(device => device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId))
+            .Select(device => device.BusId.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (attachedBusIds.Count > 0)
+        {
+            WarnRateLimited(
+                eventName: "usb.transport.hyperv.self_heal.skipped_attached",
+                message: "Hyper-V Socket Selbstheilung ausgesetzt, solange USB im Guest verbunden ist.",
+                data: new
+                {
+                    failureCount = _usbHyperVSocketProbeFailureCount,
+                    threshold = UsbHyperVProbeFailureThresholdBeforeRestart,
+                    attachedBusIds,
+                    restartBackoffSeconds = (int)UsbHyperVProxyRestartBackoffInterval.TotalSeconds
+                },
+                scopeKey: "attached",
+                minInterval: RecurringWarnRateLimitInterval);
+            return;
+        }
+
         var now = DateTimeOffset.UtcNow;
         if ((now - _usbHyperVSocketProxyLastRestartAttemptUtc) < UsbHyperVProxyRestartBackoffInterval)
         {
@@ -4287,7 +4387,9 @@ public sealed partial class App : Application
             GuestLogger.Info("usb.transport.hyperv.self_heal.restart", "Hyper-V Socket Proxy wurde zur Selbstheilung neu gestartet.", new
             {
                 serviceId = serviceId.ToString("D"),
-                failureCount = _usbHyperVSocketProbeFailureCount
+                failureCount = _usbHyperVSocketProbeFailureCount,
+                threshold = UsbHyperVProbeFailureThresholdBeforeRestart,
+                restartBackoffSeconds = (int)UsbHyperVProxyRestartBackoffInterval.TotalSeconds
             });
         }
         catch (Exception ex)

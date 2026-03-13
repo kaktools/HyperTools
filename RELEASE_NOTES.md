@@ -1,5 +1,45 @@
 # HyperTool Release Notes
 
+## v2.4.8
+
+### Highlights
+
+- USB-Dongle-Share fuer produktive Umgebungen weiter gehaertet (Guest + Host), mit Fokus auf Stabilitaet bei lang laufenden Sessions.
+- Guest behandelt `already exported` jetzt robuster, damit stale Exports auf dem Host nicht kuenstlich am Leben gehalten werden.
+- Hyper-V-Socket Self-Heal im Guest deutlich konservativer gemacht und bei aktiv attached USB ausgesetzt.
+- Host-Resource-Monitoring gegen WinUI-Threading-Fehler gehaertet (COMException `0x8001010E` behoben).
+
+### Verbessert
+
+- Guest USB Attach/Recovery:
+	- Bei `already exported` wird ein Heartbeat nur noch gesendet, wenn das Geraet nach Refresh lokal wirklich als `Attached` sichtbar ist.
+	- Neues Diagnose-Event fuer den Problemfall `already exported + lokal nicht attached` hinzugefuegt.
+- Guest Transport-Stabilitaet:
+	- Self-Heal-Threshold fuer Hyper-V-Socket-Probes angehoben.
+	- Restart-Backoff verlaengert.
+	- Self-Heal-Restart wird uebersprungen, solange USB im Guest aktiv attached ist.
+- Guest Refresh-Verhalten:
+	- Adaptive USB-Auto-Refresh-Intervalle (schnell/langsam je nach Zustand).
+	- Hintergrund-Refresh und Host-Identity-Abfragen bei bereits attached USB zusaetzlich gedrosselt.
+	- Debug-Log-Spam aus stillen Auto-Refresh-Zyklen reduziert.
+- Host Monitoring/Logging:
+	- Resource-Monitor-Loop mit besserer Fehlerisolation (Teilschritte separat abgesichert).
+	- Failure-Logging rate-limitiert mit Suppressed-Count statt Dauer-Feuer.
+	- Updates in den Monitoring-Pfaden auf UI-Thread marshalled, um WinRT/COM-Threading-Probleme zu vermeiden.
+- Host USB Stale-Detach:
+	- Konservativere Grace-/Retry-Parameter fuer loopback-nahe bzw. guest-gemanagte Attachments.
+	- Wiederholte Debug-Logs fuer ACK-Tracking deutlich reduziert.
+
+### Behoben
+
+- `Resource monitor loop cycle failed` durch `COMException (0x8001010E)` im Host-Monitorpfad beseitigt (UI-thread-sicheres Update).
+- Risiko reduziert, dass produktive Dongle-Sessions bei transienten Transport- oder ACK-Stoerungen unnoetig getrennt werden.
+- Dauerhafte `already exported`-Schleifen im Guest-Connect-Pfad entschraerft, wenn lokal kein valider Attach-Zustand vorliegt.
+
+### Doku
+
+- README auf `v2.4.8` aktualisiert (Release-Stand, Build-Beispiele, Stabilitaets-Hinweise).
+
 ## v2.4.7
 
 ### Highlights
