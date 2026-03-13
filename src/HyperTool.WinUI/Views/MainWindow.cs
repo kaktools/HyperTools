@@ -2620,6 +2620,13 @@ public sealed class MainWindow : Window
         Grid.SetRow(updateCheck, 2);
         quickTogglesGrid.Children.Add(updateCheck);
 
+        var debugLoggingCheck = CreateCheckBox("Debug-Logging aktivieren", () => _viewModel.UiDebugLoggingEnabled, value => _viewModel.UiDebugLoggingEnabled = value);
+        debugLoggingCheck.HorizontalAlignment = HorizontalAlignment.Left;
+        debugLoggingCheck.Margin = new Thickness(0);
+        Grid.SetColumn(debugLoggingCheck, 1);
+        Grid.SetRow(debugLoggingCheck, 3);
+        quickTogglesGrid.Children.Add(debugLoggingCheck);
+
         systemStack.Children.Add(quickTogglesGrid);
 
         var hostRow = new Grid { ColumnSpacing = 8, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0) };

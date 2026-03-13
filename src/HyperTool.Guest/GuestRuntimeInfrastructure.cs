@@ -1,3 +1,4 @@
+using HyperTool.Services;
 using System.Text.Json;
 using System.Text;
 
@@ -14,10 +15,11 @@ internal static class GuestLogger
 
     private static string _logFilePath = string.Empty;
     private static bool _echoToConsole = true;
+    private static bool _debugEnabled;
 
     public static event Action<string>? EntryWritten;
 
-    public static void Initialize(GuestLoggingSettings settings)
+    public static void Initialize(GuestLoggingSettings settings, bool debugEnabled = false)
     {
         var directory = string.IsNullOrWhiteSpace(settings.DirectoryPath)
             ? GuestConfigService.DefaultLogDirectory
@@ -28,9 +30,10 @@ internal static class GuestLogger
             : settings.FileName;
 
         Directory.CreateDirectory(directory);
-        CleanupOldLogFiles(directory, LogRetentionPeriod);
-        _logFilePath = Path.Combine(directory, fileName);
+        SessionLogFileService.CleanupOldLogFiles(directory, LogRetentionPeriod);
+        _logFilePath = SessionLogFileService.CreateSessionLogFilePath(directory, fileName);
         _echoToConsole = settings.EchoToConsole;
+        _debugEnabled = debugEnabled;
 
         try
         {
@@ -55,6 +58,9 @@ internal static class GuestLogger
     public static void Info(string eventName, string message, object? data = null)
         => Write("INFO", eventName, message, data);
 
+    public static void Debug(string eventName, string message, object? data = null)
+        => Write("DEBUG", eventName, message, data);
+
     public static void Warn(string eventName, string message, object? data = null)
         => Write("WARN", eventName, message, data);
 
@@ -63,6 +69,11 @@ internal static class GuestLogger
 
     private static void Write(string level, string eventName, string message, object? data)
     {
+        if (string.Equals(level, "DEBUG", StringComparison.OrdinalIgnoreCase) && !_debugEnabled)
+        {
+            return;
+        }
+
         var entry = new Dictionary<string, object?>
         {
             ["timestampUtc"] = DateTime.UtcNow,
@@ -89,35 +100,6 @@ internal static class GuestLogger
             }
 
             EntryWritten?.Invoke($"[{DateTime.Now:HH:mm:ss}] [{level}] {message}");
-        }
-    }
-
-    private static void CleanupOldLogFiles(string directory, TimeSpan maxAge)
-    {
-        try
-        {
-            if (!Directory.Exists(directory))
-            {
-                return;
-            }
-
-            var cutoffUtc = DateTime.UtcNow - maxAge;
-            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly))
-            {
-                try
-                {
-                    if (File.GetLastWriteTimeUtc(file) < cutoffUtc)
-                    {
-                        File.Delete(file);
-                    }
-                }
-                catch
-                {
-                }
-            }
-        }
-        catch
-        {
         }
     }
 }

@@ -148,6 +148,9 @@ public partial class MainViewModel : ViewModelBase
     private bool _uiRestoreNumLockAfterVmStart;
 
     [ObservableProperty]
+    private bool _uiDebugLoggingEnabled;
+
+    [ObservableProperty]
     private bool _uiOpenVmConnectWithSessionEdit;
 
     [DllImport("user32.dll")]
@@ -453,6 +456,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly Queue<double> _hostRamPressureHistory = new();
     private static readonly HttpClient UpdateDownloadClient = new();
     private int _uiNumLockWatcherIntervalSeconds = 30;
+    private bool _lastAppliedDebugLoggingEnabled;
     private int _usbAutoDetachRetryAttempts = DefaultStaleUsbDetachRetryThreshold;
     private TimeSpan _usbAutoDetachGracePeriod = DefaultStaleUsbAttachGracePeriod;
     private TimeSpan _usbAutoDetachRetryDelay = TimeSpan.FromMilliseconds(450);
@@ -552,6 +556,8 @@ public partial class MainViewModel : ViewModelBase
         UiStartWithWindows = configResult.Config.Ui.StartWithWindows;
         UiOpenConsoleAfterVmStart = configResult.Config.Ui.OpenConsoleAfterVmStart;
         UiRestoreNumLockAfterVmStart = configResult.Config.Ui.RestoreNumLockAfterVmStart;
+        UiDebugLoggingEnabled = configResult.Config.Ui.DebugLoggingEnabled;
+        _lastAppliedDebugLoggingEnabled = UiDebugLoggingEnabled;
         _uiNumLockWatcherIntervalSeconds = Math.Clamp(configResult.Config.Ui.NumLockWatcherIntervalSeconds, 5, 600);
         UiOpenVmConnectWithSessionEdit = configResult.Config.Ui.OpenVmConnectWithSessionEdit;
         UiTheme = NormalizeUiTheme(configResult.Config.Ui.Theme);
@@ -840,6 +846,8 @@ public partial class MainViewModel : ViewModelBase
     partial void OnUiOpenConsoleAfterVmStartChanged(bool value) => MarkConfigDirty();
 
     partial void OnUiRestoreNumLockAfterVmStartChanged(bool value) => MarkConfigDirty();
+
+    partial void OnUiDebugLoggingEnabledChanged(bool value) => MarkConfigDirty();
 
     partial void OnUiOpenVmConnectWithSessionEditChanged(bool value) => MarkConfigDirty();
 
@@ -3937,6 +3945,7 @@ public partial class MainViewModel : ViewModelBase
                 {
                     WindowTitle = "HyperTool",
                     Theme = NormalizeUiTheme(UiTheme),
+                    DebugLoggingEnabled = UiDebugLoggingEnabled,
                     StartMinimized = UiStartMinimized,
                     MinimizeToTray = true,
                     EnableTrayIcon = true,
@@ -4008,6 +4017,20 @@ public partial class MainViewModel : ViewModelBase
                     && !_startupService.SetStartWithWindows(UiStartWithWindows, "HyperTool", executablePath, out var startupError))
                 {
                     AddNotification($"Autostart konnte nicht gesetzt werden: {startupError}", "Warning");
+                }
+
+                if (_lastAppliedDebugLoggingEnabled != UiDebugLoggingEnabled)
+                {
+                    try
+                    {
+                        var logPath = HostLoggingService.Initialize(UiDebugLoggingEnabled);
+                        _lastAppliedDebugLoggingEnabled = UiDebugLoggingEnabled;
+                        Log.Information("Host logging reconfigured. DebugLoggingEnabled={DebugLoggingEnabled}; LogPath={LogPath}", UiDebugLoggingEnabled, logPath);
+                    }
+                    catch (Exception logEx)
+                    {
+                        AddNotification($"Logging konnte nicht neu initialisiert werden: {logEx.Message}", "Warning");
+                    }
                 }
 
                 AddNotification("Konfiguration gespeichert.", "Success");
@@ -5952,6 +5975,8 @@ public partial class MainViewModel : ViewModelBase
                 UiStartWithWindows = config.Ui.StartWithWindows;
                 UiOpenConsoleAfterVmStart = config.Ui.OpenConsoleAfterVmStart;
                 UiRestoreNumLockAfterVmStart = config.Ui.RestoreNumLockAfterVmStart;
+                UiDebugLoggingEnabled = config.Ui.DebugLoggingEnabled;
+                _lastAppliedDebugLoggingEnabled = UiDebugLoggingEnabled;
                 _uiNumLockWatcherIntervalSeconds = Math.Clamp(config.Ui.NumLockWatcherIntervalSeconds, 5, 600);
                 UiOpenVmConnectWithSessionEdit = config.Ui.OpenVmConnectWithSessionEdit;
                 UiTheme = NormalizeUiTheme(config.Ui.Theme);
@@ -6335,6 +6360,9 @@ public partial class MainViewModel : ViewModelBase
             UiStartMinimized = config.Ui.StartMinimized;
             UiStartWithWindows = config.Ui.StartWithWindows;
             UiOpenConsoleAfterVmStart = config.Ui.OpenConsoleAfterVmStart;
+            UiRestoreNumLockAfterVmStart = config.Ui.RestoreNumLockAfterVmStart;
+            UiDebugLoggingEnabled = config.Ui.DebugLoggingEnabled;
+            _lastAppliedDebugLoggingEnabled = UiDebugLoggingEnabled;
             UiOpenVmConnectWithSessionEdit = config.Ui.OpenVmConnectWithSessionEdit;
             UiTheme = NormalizeUiTheme(config.Ui.Theme);
             ApplyConfiguredVmDefinitions(config.Vms);

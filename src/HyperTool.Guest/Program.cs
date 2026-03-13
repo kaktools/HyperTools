@@ -25,7 +25,7 @@ internal static class GuestCli
                     DirectoryPath = GuestConfigService.DefaultLogDirectory,
                     FileName = "hypertool-guest.log",
                     EchoToConsole = true
-                });
+                }, debugEnabled: false);
 
                 GuestLogger.Info("config.created", "Konfiguration erstellt.", new { configPath });
                 GuestLogger.Info("config.hint", "Bitte SharePath/DriveLetter anpassen und erneut starten.");
@@ -38,8 +38,8 @@ internal static class GuestCli
             return 1;
         }
 
-        GuestLogger.Initialize(config.Logging);
-        GuestLogger.Info("startup", "HyperTool.Guest gestartet.", new { command, configPath });
+        GuestLogger.Initialize(config.Logging, config.Ui.DebugLoggingEnabled);
+        GuestLogger.Info("startup", "HyperTool.Guest gestartet.", new { command, configPath, debugLoggingEnabled = config.Ui.DebugLoggingEnabled });
 
         var driveLetter = GuestConfigService.NormalizeDriveLetter(config.DriveLetter);
         var handshakeState = new GuestHandshakeState
@@ -50,6 +50,16 @@ internal static class GuestCli
             DriveLetter = driveLetter,
             PreferredAutostartMode = config.Autostart.PreferredMode
         };
+
+        GuestLogger.Debug("startup.config", "Guest-Konfiguration geladen.", new
+        {
+            configPath,
+            command,
+            driveLetter,
+            sharePath = config.SharePath,
+            pollIntervalSeconds = config.PollIntervalSeconds,
+            useHyperVSocket = config.Usb?.UseHyperVSocket != false
+        });
 
         try
         {
@@ -240,6 +250,7 @@ internal static class GuestCli
 
         while (!cts.IsCancellationRequested)
         {
+            GuestLogger.Debug("loop.iteration", "Run-Loop startet neuen Prüfzyklus.", new { driveLetter, config.PollIntervalSeconds });
             var ensureCode = await EnsureMappedAsync(config, driveLetter);
             handshakeState.LastExitCode = ensureCode;
             handshakeState.LastError = ensureCode == 0 ? string.Empty : "Mapping fehlgeschlagen.";

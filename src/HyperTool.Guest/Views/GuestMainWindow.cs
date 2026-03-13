@@ -168,6 +168,7 @@ internal sealed class GuestMainWindow : Window
     private readonly CheckBox _startMinimizedCheckBox = new() { Content = "Beim Start minimiert" };
     private readonly CheckBox _minimizeToTrayCheckBox = new() { Content = "Tasktray-Menü aktiv" };
     private readonly CheckBox _checkForUpdatesOnStartupCheckBox = new() { Content = "Beim Start auf Updates prüfen" };
+    private readonly CheckBox _debugLoggingCheckBox = new() { Content = "Debug-Logging aktivieren" };
     private readonly CheckBox _useHyperVSocketCheckBox = new() { Content = "Hyper-V Socket verwenden (bevorzugt)" };
     private readonly CheckBox _usbAutoConnectCheckBox = new() { Content = "Auto-Connect für ausgewähltes Gerät" };
     private readonly CheckBox _usbDisconnectOnExitCheckBox = new() { Content = "Disconnect beim Beenden" };
@@ -3077,6 +3078,7 @@ internal sealed class GuestMainWindow : Window
         quickTogglesGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         quickTogglesGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         quickTogglesGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        quickTogglesGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
         _minimizeToTrayCheckBox.Margin = new Thickness(0);
         Grid.SetColumn(_minimizeToTrayCheckBox, 0);
@@ -3098,6 +3100,12 @@ internal sealed class GuestMainWindow : Window
         Grid.SetColumn(_checkForUpdatesOnStartupCheckBox, 1);
         Grid.SetRow(_checkForUpdatesOnStartupCheckBox, 1);
         quickTogglesGrid.Children.Add(_checkForUpdatesOnStartupCheckBox);
+
+        _debugLoggingCheckBox.Margin = new Thickness(0);
+        _debugLoggingCheckBox.HorizontalAlignment = HorizontalAlignment.Left;
+        Grid.SetColumn(_debugLoggingCheckBox, 0);
+        Grid.SetRow(_debugLoggingCheckBox, 2);
+        quickTogglesGrid.Children.Add(_debugLoggingCheckBox);
 
         systemStack.Children.Add(quickTogglesGrid);
 
@@ -3567,7 +3575,8 @@ internal sealed class GuestMainWindow : Window
         if ((_startWithWindowsCheckBox.IsChecked == true) != _config.Ui.StartWithWindows
             || (_startMinimizedCheckBox.IsChecked == true) != _config.Ui.StartMinimized
             || (_minimizeToTrayCheckBox.IsChecked == true) != _config.Ui.MinimizeToTray
-            || (_checkForUpdatesOnStartupCheckBox.IsChecked != false) != _config.Ui.CheckForUpdatesOnStartup)
+            || (_checkForUpdatesOnStartupCheckBox.IsChecked != false) != _config.Ui.CheckForUpdatesOnStartup
+            || (_debugLoggingCheckBox.IsChecked == true) != _config.Ui.DebugLoggingEnabled)
         {
             return true;
         }
@@ -3690,6 +3699,7 @@ internal sealed class GuestMainWindow : Window
         _startMinimizedCheckBox.IsChecked = _config.Ui.StartMinimized;
         _minimizeToTrayCheckBox.IsChecked = _config.Ui.MinimizeToTray;
         _checkForUpdatesOnStartupCheckBox.IsChecked = _config.Ui.CheckForUpdatesOnStartup;
+        _debugLoggingCheckBox.IsChecked = _config.Ui.DebugLoggingEnabled;
 
         _config.FileService ??= new GuestFileServiceSettings();
         _config.FileService.MappingMode = GuestConfigService.NormalizeMappingMode(_config.FileService.MappingMode);
@@ -3797,6 +3807,7 @@ internal sealed class GuestMainWindow : Window
         _config.Ui.StartMinimized = _startMinimizedCheckBox.IsChecked == true;
         _config.Ui.MinimizeToTray = _minimizeToTrayCheckBox.IsChecked == true;
         _config.Ui.CheckForUpdatesOnStartup = _checkForUpdatesOnStartupCheckBox.IsChecked != false;
+        _config.Ui.DebugLoggingEnabled = _debugLoggingCheckBox.IsChecked == true;
         _config.Usb ??= new GuestUsbSettings();
         _config.Usb.Enabled = _usbFeatureEnabledToggleSwitch.IsOn;
         _config.Usb.DisconnectOnExit = _usbDisconnectOnExitCheckBox.IsChecked != false;

@@ -1222,7 +1222,16 @@ public sealed partial class App : Application
         GuestConfigService.TryMigrateLegacyConfig(_configPath);
         _config = GuestConfigService.LoadOrCreate(_configPath, out _);
         _currentUsbTransportUseHyperVSocket = _config.Usb?.UseHyperVSocket != false;
-        GuestLogger.Initialize(_config.Logging);
+        GuestLogger.Initialize(_config.Logging, _config.Ui.DebugLoggingEnabled);
+        GuestLogger.Info("ui.startup", "HyperTool Guest UI gestartet.", new
+        {
+            configPath = _configPath,
+            skipStartScreen,
+            startMinimized = _config.Ui.StartMinimized,
+            minimizeToTray = _config.Ui.MinimizeToTray,
+            debugLoggingEnabled = _config.Ui.DebugLoggingEnabled
+        });
+        GuestLogger.Debug("ui.startup.steps", "Initialisiere Guest-Hintergrunddienste.");
         await RefreshUsbClientAvailabilityAsync();
         UpdateUsbTransportBridge();
         StartUsbDiagnosticsLoop();
@@ -1310,12 +1319,21 @@ public sealed partial class App : Application
         {
             BringMainWindowToFront();
         }
+
+        GuestLogger.Debug("ui.startup.ready", "Guest UI vollständig initialisiert.");
     }
 
     private async Task SaveConfigAsync(GuestConfig config)
     {
         var previousTransportMode = _currentUsbTransportUseHyperVSocket;
         var nextTransportMode = config.Usb?.UseHyperVSocket != false;
+
+        GuestLogger.Debug("config.save.begin", "Speichere Guest-Konfiguration.", new
+        {
+            debugLoggingEnabled = config.Ui.DebugLoggingEnabled,
+            previousTransportMode,
+            nextTransportMode
+        });
 
         if (previousTransportMode != nextTransportMode)
         {
@@ -1324,6 +1342,7 @@ public sealed partial class App : Application
 
         _config = config;
         GuestConfigService.Save(_configPath, config);
+        GuestLogger.Initialize(config.Logging, config.Ui.DebugLoggingEnabled);
 
         ApplyStartWithWindows(config);
         _minimizeToTray = config.Ui.MinimizeToTray;
@@ -1333,6 +1352,11 @@ public sealed partial class App : Application
         TriggerSharedFolderReconnectCycle();
         UpdateSharedFolderReconnectStatusPanel();
         StartResourceMonitorAgent();
+        GuestLogger.Info("config.save.done", "Guest-Konfiguration gespeichert.", new
+        {
+            debugLoggingEnabled = config.Ui.DebugLoggingEnabled,
+            transportMode = nextTransportMode ? "hyperv" : "ip-fallback"
+        });
 
         await Task.CompletedTask;
     }
@@ -1341,12 +1365,16 @@ public sealed partial class App : Application
     {
         _config = GuestConfigService.LoadOrCreate(_configPath, out _);
         _currentUsbTransportUseHyperVSocket = _config.Usb?.UseHyperVSocket != false;
+        GuestLogger.Initialize(_config.Logging, _config.Ui.DebugLoggingEnabled);
+        GuestLogger.Debug("config.reload", "Guest-Konfiguration aus Datei neu geladen.", new { configPath = _configPath, debugLoggingEnabled = _config.Ui.DebugLoggingEnabled });
         StartResourceMonitorAgent();
         return Task.FromResult(_config);
     }
 
     private async Task RunDeferredStartupTasksAsync()
     {
+        GuestLogger.Debug("startup.deferred.begin", "Starte verzögerte Hintergrundaufgaben.");
+
         try
         {
             var identity = await FetchHostIdentityViaHyperVSocketAsync(CancellationToken.None);
@@ -1372,17 +1400,25 @@ public sealed partial class App : Application
         {
             GuestLogger.Warn("startup.updatecheck_failed", ex.Message);
         }
+
+        GuestLogger.Debug("startup.deferred.done", "Verzögerte Hintergrundaufgaben abgeschlossen.");
     }
 
     private async Task EnsureStartupUsbListInitializedAsync()
     {
         if (_config?.Usb?.Enabled == false || _usbDevices.Count > 0)
         {
+            GuestLogger.Debug("startup.usb_refresh.skipped", "Initiale USB-Liste wurde übersprungen.", new
+            {
+                usbEnabled = _config?.Usb?.Enabled != false,
+                existingCount = _usbDevices.Count
+            });
             return;
         }
 
         try
         {
+            GuestLogger.Debug("startup.usb_refresh.begin", "Initiale USB-Liste wird geladen.");
             await RefreshUsbDevicesAsync(emitLogs: false);
         }
         catch (Exception ex)
@@ -2017,17 +2053,31 @@ public sealed partial class App : Application
     {
         if (!emitLogs && (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc) < TimeSpan.FromMilliseconds(1200))
         {
+            GuestLogger.Debug("usb.refresh.skipped_rate_limit", "USB-Refresh wegen Rate-Limit übersprungen.", new
+            {
+                elapsedSinceLastRefreshMs = (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc).TotalMilliseconds
+            });
             return _usbDevices;
         }
 
         if (!await _usbRefreshGate.WaitAsync(0))
         {
+            GuestLogger.Debug("usb.refresh.skipped_busy", "USB-Refresh übersprungen, weil bereits ein Lauf aktiv ist.");
             return _usbDevices;
         }
 
         try
         {
         await RefreshUsbClientAvailabilityAsync();
+
+        GuestLogger.Debug("usb.refresh.begin", "USB-Refresh gestartet.", new
+        {
+            emitLogs,
+            currentCount = _usbDevices.Count,
+            selectedBusId = _selectedUsbBusId,
+            useHyperVSocket = _config?.Usb?.UseHyperVSocket != false,
+            hostFeatureEnabled = _config?.Usb?.HostFeatureEnabled != false
+        });
 
         if (_config?.Usb?.Enabled == false)
         {
@@ -2084,6 +2134,14 @@ public sealed partial class App : Application
         var operationId = CreateUsbOperationId("refresh");
         var stopwatch = Stopwatch.StartNew();
         var hostResolution = ResolveUsbHostAddressDiagnostics();
+
+        GuestLogger.Debug("usb.refresh.host_resolution", "USB-Host-Aufloesung abgeschlossen.", new
+        {
+            operationId,
+            hostResolution.ResolvedIpv4,
+            hostResolution.Source,
+            hostResolution.RawInput
+        });
 
         ApplyUsbTransportResolution(hostResolution);
         var previousCount = _usbDevices.Count;

@@ -29,7 +29,6 @@ namespace HyperTool.WinUI;
 public sealed partial class App : Application
 {
     private const int HostUsbAutoRefreshSeconds = 5;
-    private static readonly TimeSpan LogRetentionPeriod = TimeSpan.FromDays(3);
     private const string SingleInstanceMutexName = @"Local\HyperTool.WinUI.SingleInstance";
     private const string SingleInstancePipeName = "HyperTool.WinUI.SingleInstance.Activate";
     private static readonly (string ServiceId, string ElementName)[] RequiredHyperVSocketServices =
@@ -228,10 +227,17 @@ public sealed partial class App : Application
 
         try
         {
-            var logPath = InitializeLogging();
+            IConfigService configService = new ConfigService();
+            var configPath = ResolveConfigPath();
+            TryMigrateLegacyConfig(configPath);
+            var configResult = configService.LoadOrCreate(configPath);
+
+            var logPath = InitializeLogging(configResult.Config.Ui.DebugLoggingEnabled);
             Log.Information("Logging initialized at {LogPath}", logPath);
+            Log.Debug("Host configuration loaded. ConfigPath={ConfigPath}; DebugLoggingEnabled={DebugLoggingEnabled}", configResult.ConfigPath, configResult.Config.Ui.DebugLoggingEnabled);
 
             EnsureHyperVSocketServiceRegistrationsAtStartup();
+            Log.Debug("Starting host communication listeners.");
 
             try
             {
@@ -252,7 +258,6 @@ public sealed partial class App : Application
                 Log.Warning(ex, "Hyper-V socket USB host tunnel could not be started. Falling back to network-only USB transport.");
             }
 
-            IConfigService configService = new ConfigService();
             IHyperVService hyperVService = new HyperVPowerShellService();
             IHnsService hnsService = new HnsService();
             IStartupService startupService = new StartupService();
@@ -260,10 +265,6 @@ public sealed partial class App : Application
             IUsbIpService usbIpService = new UsbIpdCliService();
             _themeService = new ThemeService();
             IUiInteropService uiInteropService = new UiInteropService();
-
-            var configPath = ResolveConfigPath();
-            TryMigrateLegacyConfig(configPath);
-            var configResult = configService.LoadOrCreate(configPath);
 
             var uiConfig = configResult.Config.Ui;
             _minimizeToTray = uiConfig.MinimizeToTray;
@@ -297,6 +298,7 @@ public sealed partial class App : Application
             StartUsbDiagnosticsLoop();
             StartUsbHostDiscoveryResponder();
             StartUsbAutoRefreshLoop();
+            Log.Debug("Main window, tray services, and background loops initialized.");
 
             var shouldForceShowFromSecondLaunch = _pendingSingleInstanceShow;
 
@@ -2328,83 +2330,6 @@ public sealed partial class App : Application
         apply();
     }
 
-    private static string InitializeLogging()
-    {
-        var logDirectoryCandidates = new[]
-        {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HyperTool", "logs"),
-            Path.Combine(AppContext.BaseDirectory, "logs"),
-            Path.Combine(Path.GetTempPath(), "HyperTool", "logs")
-        };
-
-        var logsDirectory = logDirectoryCandidates.FirstOrDefault(IsWritableDirectory)
-            ?? throw new InvalidOperationException("Kein beschreibbares Logverzeichnis gefunden.");
-
-        CleanupOldLogFiles(logsDirectory, LogRetentionPeriod);
-
-        var logFilePath = Path.Combine(logsDirectory, "hypertool-.log");
-
-        Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Information()
-            .WriteTo.File(
-                logFilePath,
-                rollingInterval: RollingInterval.Day,
-                retainedFileCountLimit: 14,
-                encoding: new UTF8Encoding(encoderShouldEmitUTF8Identifier: true))
-            .CreateLogger();
-
-        return logFilePath;
-    }
-
-    private static void CleanupOldLogFiles(string directoryPath, TimeSpan maxAge)
-    {
-        try
-        {
-            if (!Directory.Exists(directoryPath))
-            {
-                return;
-            }
-
-            var cutoffUtc = DateTime.UtcNow - maxAge;
-            foreach (var filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.TopDirectoryOnly))
-            {
-                try
-                {
-                    if (File.GetLastWriteTimeUtc(filePath) < cutoffUtc)
-                    {
-                        File.Delete(filePath);
-                    }
-                }
-                catch
-                {
-                }
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private static bool IsWritableDirectory(string directoryPath)
-    {
-        try
-        {
-            Directory.CreateDirectory(directoryPath);
-
-            var probePath = Path.Combine(directoryPath, $".write-test-{Guid.NewGuid():N}.tmp");
-            using (File.Create(probePath))
-            {
-            }
-
-            File.Delete(probePath);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private void RegisterGlobalExceptionHandlers()
     {
         AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
@@ -2412,6 +2337,26 @@ public sealed partial class App : Application
             var exception = eventArgs.ExceptionObject as Exception ?? new Exception("Unknown unhandled exception");
             ShowFatalErrorAndExit(exception, "Ein kritischer Fehler ist aufgetreten.");
         };
+    }
+
+    private static string InitializeLogging(bool debugLoggingEnabled)
+    {
+        return HostLoggingService.Initialize(debugLoggingEnabled);
+    }
+
+    private static string InitializeLogging()
+    {
+        try
+        {
+            var configPath = ResolveConfigPath();
+            TryMigrateLegacyConfig(configPath);
+            var configResult = new ConfigService().LoadOrCreate(configPath);
+            return InitializeLogging(configResult.Config.Ui.DebugLoggingEnabled);
+        }
+        catch
+        {
+            return InitializeLogging(debugLoggingEnabled: false);
+        }
     }
 
     private bool TryInitializeSingleInstance()
