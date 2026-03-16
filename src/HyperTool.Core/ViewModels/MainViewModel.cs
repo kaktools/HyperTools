@@ -28,6 +28,8 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan GuestAckChannelHealthyWindow = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan UsbStaleExportHintEscalationWindow = TimeSpan.FromMinutes(2);
+    private const int UsbStaleExportHintEscalationCount = 2;
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private const int LoopbackManagedUsbDetachRetryFloor = 20;
     private static readonly TimeSpan MonitorAgentTimeout = TimeSpan.FromSeconds(5);
@@ -453,6 +455,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly Dictionary<string, int> _usbAttachedWithoutAckAttempts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _usbForceDetachFallbackBusIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _usbGuestManagedBusIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count)> _usbStaleExportHintStateByBusId = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _resourceMonitorSync = new();
     private readonly Dictionary<string, VmResourceMonitorRuntimeState> _vmMonitorStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<double> _hostCpuHistory = new();
@@ -593,6 +596,7 @@ public partial class MainViewModel : ViewModelBase
         _usbDeviceMetadataByKey.Clear();
         _usbMetadataBusAliasByKey.Clear();
         _usbMetadataBusAliasExpiresUtc.Clear();
+        LoadCheckpointDescriptionOverrides(configResult.Config);
         foreach (var metadata in configResult.Config.Usb.DeviceMetadata)
         {
             if (metadata is null)
@@ -3682,7 +3686,14 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var key = BuildCheckpointDescriptionOverrideKey(vmName, candidate);
+        var shouldPersistOverride = !_checkpointDescriptionOverridesByKey.TryGetValue(key, out var existingDescription)
+            || !string.Equals(existingDescription, description, StringComparison.Ordinal);
         _checkpointDescriptionOverridesByKey[key] = description;
+
+        if (shouldPersistOverride)
+        {
+            PersistCheckpointDescriptionOverrides();
+        }
 
         if (string.IsNullOrWhiteSpace(candidate.Description))
         {
@@ -3706,6 +3717,68 @@ public partial class MainViewModel : ViewModelBase
         var name = (checkpoint.Name ?? string.Empty).Trim();
         var created = checkpoint.Created == default ? string.Empty : checkpoint.Created.ToString("o");
         return normalizedVm + "|name:" + name + "|created:" + created;
+    }
+
+    private void LoadCheckpointDescriptionOverrides(HyperToolConfig config)
+    {
+        _checkpointDescriptionOverridesByKey.Clear();
+
+        var entries = config.Checkpoints?.DescriptionOverrides;
+        if (entries is null || entries.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var entry in entries)
+        {
+            if (entry is null)
+            {
+                continue;
+            }
+
+            var key = (entry.Key ?? string.Empty).Trim();
+            var description = (entry.Description ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(description))
+            {
+                continue;
+            }
+
+            _checkpointDescriptionOverridesByKey[key] = description;
+        }
+    }
+
+    private static List<CheckpointDescriptionOverrideEntry> BuildCheckpointDescriptionOverrideEntries(IDictionary<string, string> overridesByKey)
+    {
+        return overridesByKey
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key)
+                           && !string.IsNullOrWhiteSpace(pair.Value))
+            .Select(pair => new CheckpointDescriptionOverrideEntry
+            {
+                Key = pair.Key.Trim(),
+                Description = pair.Value.Trim()
+            })
+            .OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private void PersistCheckpointDescriptionOverrides()
+    {
+        try
+        {
+            var configResult = _configService.LoadOrCreate(_configPath);
+            configResult.Config.Checkpoints ??= new CheckpointSettings();
+            configResult.Config.Checkpoints.DescriptionOverrides = BuildCheckpointDescriptionOverrideEntries(_checkpointDescriptionOverridesByKey);
+
+            if (!_configService.TrySave(_configPath, configResult.Config, out var errorMessage))
+            {
+                AddNotification($"Checkpoint-Beschreibungen konnten nicht gespeichert werden: {errorMessage}", "Warning");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Checkpoint-Beschreibungen konnten nicht gespeichert werden.");
+            AddNotification("Checkpoint-Beschreibungen konnten nicht gespeichert werden.", "Warning");
+        }
     }
 
     private async Task ApplyCheckpointAsync()
@@ -4247,6 +4320,10 @@ public partial class MainViewModel : ViewModelBase
                     IntervalMs = _monitorIntervalMs,
                     GraphHistoryMinutes = _monitorHistoryMinutes,
                     GraphHistorySize = _monitorHistorySize
+                },
+                Checkpoints = new CheckpointSettings
+                {
+                    DescriptionOverrides = BuildCheckpointDescriptionOverrideEntries(_checkpointDescriptionOverridesByKey)
                 },
                 DefaultVmImportDestinationPath = DefaultVmImportDestinationPath.Trim()
             };
@@ -5162,6 +5239,150 @@ public partial class MainViewModel : ViewModelBase
         catch (Exception ex)
         {
             Log.Warning(ex, "Automatic USB detach after client disconnect failed. BusId={BusId}", normalizedBusId);
+        }
+        finally
+        {
+            if (gateEntered)
+            {
+                _usbTrayRefreshGate.Release();
+            }
+        }
+    }
+
+    public async Task HandleUsbStaleExportHintAsync(string busId, string? sourceVmId = null, string? guestComputerName = null)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId)
+            || !HostUsbSharingEnabled
+            || !UsbAutoDetachOnClientDisconnect)
+        {
+            return;
+        }
+
+        var normalizedSourceVmId = (sourceVmId ?? string.Empty).Trim();
+        var normalizedGuestComputerName = (guestComputerName ?? string.Empty).Trim();
+
+        var gateEntered = false;
+        try
+        {
+            await _usbTrayRefreshGate.WaitAsync(_lifetimeCancellation.Token);
+            gateEntered = true;
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+            cts.CancelAfter(TimeSpan.FromSeconds(8));
+
+            var devices = await _usbIpService.GetDevicesAsync(cts.Token);
+            var hostDevice = devices.FirstOrDefault(device =>
+                !string.IsNullOrWhiteSpace(device.BusId)
+                && string.Equals(device.BusId.Trim(), normalizedBusId, StringComparison.OrdinalIgnoreCase));
+
+            if (hostDevice is null || !hostDevice.IsAttached)
+            {
+                _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
+                _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
+                _usbForceDetachFallbackBusIds.Remove(normalizedBusId);
+                _usbGuestManagedBusIds.Remove(normalizedBusId);
+                _usbStaleExportHintStateByBusId.Remove(normalizedBusId);
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(normalizedSourceVmId)
+                && UsbGuestConnectionRegistry.TryGetGuestVmId(normalizedBusId, out var trackedVmId)
+                && !string.IsNullOrWhiteSpace(trackedVmId)
+                && !string.Equals(trackedVmId, normalizedSourceVmId, StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Debug(
+                    "Ignored stale export hint due to VM mismatch. BusId={BusId}; HintVmId={HintVmId}; TrackedVmId={TrackedVmId}",
+                    normalizedBusId,
+                    normalizedSourceVmId,
+                    trackedVmId);
+                return;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            if (!_usbStaleExportHintStateByBusId.TryGetValue(normalizedBusId, out var hintState)
+                || (now - hintState.LastSeenUtc) > UsbStaleExportHintEscalationWindow)
+            {
+                hintState = (now, now, 1);
+            }
+            else
+            {
+                hintState = (hintState.FirstSeenUtc, now, hintState.Count + 1);
+            }
+
+            _usbStaleExportHintStateByBusId[normalizedBusId] = hintState;
+
+            if (hintState.Count < UsbStaleExportHintEscalationCount)
+            {
+                // During short Hyper-V transport hiccups keep ownership context alive and
+                // avoid detaching active USB shares too early.
+                _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
+                _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
+                _usbForceDetachFallbackBusIds.Remove(normalizedBusId);
+                _usbGuestManagedBusIds.Add(normalizedBusId);
+
+                Log.Information(
+                    "Stale export hint received from guest. Holding host detach while transport recovers. BusId={BusId}; HintCount={HintCount}/{EscalationCount}; HintWindowAgeSeconds={HintWindowAgeSeconds}; SourceVmId={SourceVmId}; GuestComputerName={GuestComputerName}",
+                    normalizedBusId,
+                    hintState.Count,
+                    UsbStaleExportHintEscalationCount,
+                    (int)Math.Max(0, (now - hintState.FirstSeenUtc).TotalSeconds),
+                    string.IsNullOrWhiteSpace(normalizedSourceVmId) ? "unknown" : normalizedSourceVmId,
+                    string.IsNullOrWhiteSpace(normalizedGuestComputerName) ? "unknown" : normalizedGuestComputerName);
+
+                return;
+            }
+
+            try
+            {
+                using var immediateDetachCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+                immediateDetachCts.CancelAfter(TimeSpan.FromSeconds(10));
+                await _usbIpService.DetachAsync(normalizedBusId, immediateDetachCts.Token);
+
+                _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
+                _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
+                _usbForceDetachFallbackBusIds.Remove(normalizedBusId);
+                _usbGuestManagedBusIds.Remove(normalizedBusId);
+                _usbStaleExportHintStateByBusId.Remove(normalizedBusId);
+
+                Log.Warning(
+                    "Stale export hint persisted. Immediate host detach executed to recover stale export. BusId={BusId}; SourceVmId={SourceVmId}; GuestComputerName={GuestComputerName}",
+                    normalizedBusId,
+                    string.IsNullOrWhiteSpace(normalizedSourceVmId) ? "unknown" : normalizedSourceVmId,
+                    string.IsNullOrWhiteSpace(normalizedGuestComputerName) ? "unknown" : normalizedGuestComputerName);
+
+                await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
+                return;
+            }
+            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Immediate stale-export detach failed; scheduling accelerated stale-ack fallback. BusId={BusId}", normalizedBusId);
+            }
+
+            _usbAttachedWithoutAckSinceUtc[normalizedBusId] = now - _usbAutoDetachGracePeriod;
+            _usbAttachedWithoutAckAttempts[normalizedBusId] = Math.Max(_usbAutoDetachRetryAttempts - 1, 0);
+            _usbForceDetachFallbackBusIds.Add(normalizedBusId);
+            _usbGuestManagedBusIds.Add(normalizedBusId);
+            _usbStaleExportHintStateByBusId.Remove(normalizedBusId);
+
+            Log.Warning(
+                "Stale export hint persisted. Accelerated stale-ack detach scheduled. BusId={BusId}; SourceVmId={SourceVmId}; GuestComputerName={GuestComputerName}",
+                normalizedBusId,
+                string.IsNullOrWhiteSpace(normalizedSourceVmId) ? "unknown" : normalizedSourceVmId,
+                string.IsNullOrWhiteSpace(normalizedGuestComputerName) ? "unknown" : normalizedGuestComputerName);
+
+            await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Failed to process stale export hint from guest. BusId={BusId}", normalizedBusId);
         }
         finally
         {
@@ -6269,6 +6490,7 @@ public partial class MainViewModel : ViewModelBase
                 _monitorIntervalMs = config.Monitoring.IntervalMs;
                 _monitorHistoryMinutes = config.Monitoring.GraphHistoryMinutes;
                 _monitorHistorySize = config.Monitoring.GraphHistorySize;
+                LoadCheckpointDescriptionOverrides(config);
                 _usbAutoShareDeviceKeys.Clear();
                 foreach (var key in config.Usb.AutoShareDeviceKeys)
                 {
@@ -6675,6 +6897,7 @@ public partial class MainViewModel : ViewModelBase
             _usbDeviceMetadataByKey.Clear();
             _usbMetadataBusAliasByKey.Clear();
             _usbMetadataBusAliasExpiresUtc.Clear();
+            LoadCheckpointDescriptionOverrides(config);
             foreach (var metadata in config.Usb.DeviceMetadata)
             {
                 if (metadata is null)

@@ -217,6 +217,36 @@ public sealed class ConfigService : IConfigService
         config.Usb ??= new UsbSettings();
         config.SharedFolders ??= new SharedFolderSettings();
         config.Monitoring ??= new MonitoringSettings();
+        config.Checkpoints ??= new CheckpointSettings();
+
+        if (config.Checkpoints.DescriptionOverrides is null)
+        {
+            config.Checkpoints.DescriptionOverrides = [];
+            wasUpdated = true;
+        }
+        else
+        {
+            var normalizedCheckpointOverrides = config.Checkpoints.DescriptionOverrides
+                .Where(entry => entry is not null)
+                .Select(entry => new CheckpointDescriptionOverrideEntry
+                {
+                    Key = entry.Key?.Trim() ?? string.Empty,
+                    Description = entry.Description?.Trim() ?? string.Empty
+                })
+                .Where(entry => !string.IsNullOrWhiteSpace(entry.Key)
+                                && !string.IsNullOrWhiteSpace(entry.Description))
+                .GroupBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (normalizedCheckpointOverrides.Count != config.Checkpoints.DescriptionOverrides.Count)
+            {
+                wasUpdated = true;
+            }
+
+            config.Checkpoints.DescriptionOverrides = normalizedCheckpointOverrides;
+        }
 
         if (config.Ui.TrayVmNames is null)
         {

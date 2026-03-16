@@ -31,12 +31,15 @@ public sealed partial class App : Application
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
     private const int GuestUsbHeartbeatIntervalSeconds = 45;
     private const int HyperVProbeGraceAfterDataPathSuccessSeconds = 180;
+    private const int HyperVForcedSelfHealStaleSeconds = 480;
+    private const int HyperVForcedSelfHealProbeFailureMultiplier = 2;
     private static readonly TimeSpan UsbRefreshSuccessLogHeartbeatInterval = TimeSpan.FromSeconds(45);
     private const int UsbHyperVProbeFailureThresholdBeforeRestart = 12;
     private static readonly TimeSpan UsbHyperVProxyRestartBackoffInterval = TimeSpan.FromSeconds(90);
     private const int SharedFolderCatalogFetchMaxAttempts = 3;
     private static readonly TimeSpan SharedFolderCatalogReadyLogHeartbeatInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan RecurringWarnRateLimitInterval = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan UsbStaleExportHintMinInterval = TimeSpan.FromSeconds(45);
     private const string GuestWindowTitle = "HyperTool Guest";
     private const string GuestHeadline = "HyperTool Guest";
     private const string GuestIconUri = "ms-appx:///Assets/HyperTool.Guest.Icon.Transparent.png";
@@ -142,6 +145,7 @@ public sealed partial class App : Application
     private readonly GuestResourceMonitorAgent _resourceMonitorAgent = new();
     private readonly SystemResourceSampler _diagnosticsResourceSampler = new();
     private readonly ConcurrentDictionary<string, RateLimitedWarnState> _rateLimitedWarnStates = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _usbStaleExportHintLastSentUtc = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset? _sharedFolderReconnectLastRunUtc;
     private string _sharedFolderReconnectLastSummary = "Noch kein Lauf";
     private DateTimeOffset? _sharedFolderCatalogReadyLastLoggedUtc;
@@ -2658,6 +2662,8 @@ public sealed partial class App : Application
                     },
                     scopeKey: busId.Trim().ToLowerInvariant(),
                     minInterval: RecurringWarnRateLimitInterval);
+
+                await TrySendUsbStaleExportHintAsync(busId, hostResolution, operationId, stopwatch.ElapsedMilliseconds);
             }
 
             if (ShouldRetryUsbAttach(ex))
@@ -4600,8 +4606,23 @@ public sealed partial class App : Application
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        var now = DateTimeOffset.UtcNow;
+        var restartBackoffActive = (now - _usbHyperVSocketProxyLastRestartAttemptUtc) < UsbHyperVProxyRestartBackoffInterval;
+
         if (attachedBusIds.Count > 0)
         {
+            var lastDataPathSuccessAgeSeconds = _lastHyperVDataPathSuccessUtc == DateTimeOffset.MinValue
+                ? int.MaxValue
+                : (int)Math.Clamp((now - _lastHyperVDataPathSuccessUtc).TotalSeconds, 0, int.MaxValue);
+
+            var persistentTransportFailure =
+                _usbHyperVSocketProbeFailureCount >= (UsbHyperVProbeFailureThresholdBeforeRestart * HyperVForcedSelfHealProbeFailureMultiplier)
+                && _hyperVDataPathConsecutiveFailures >= 3
+                && !HasRecentHyperVDataPathSuccess()
+                && lastDataPathSuccessAgeSeconds >= HyperVForcedSelfHealStaleSeconds;
+
+            if (!persistentTransportFailure)
+            {
             WarnRateLimited(
                 eventName: "usb.transport.hyperv.self_heal.skipped_attached",
                 message: "Hyper-V Socket Selbstheilung ausgesetzt, solange USB im Guest verbunden ist.",
@@ -4614,11 +4635,39 @@ public sealed partial class App : Application
                 },
                 scopeKey: "attached",
                 minInterval: RecurringWarnRateLimitInterval);
-            return;
+                return;
+            }
+
+            if (restartBackoffActive)
+            {
+                WarnRateLimited(
+                    eventName: "usb.transport.hyperv.self_heal.delayed_attached",
+                    message: "Hyper-V Socket Selbstheilung wird trotz USB-Attach verschoben (Restart-Backoff aktiv).",
+                    data: new
+                    {
+                        failureCount = _usbHyperVSocketProbeFailureCount,
+                        threshold = UsbHyperVProbeFailureThresholdBeforeRestart,
+                        attachedBusIds,
+                        lastDataPathSuccessAgeSeconds,
+                        restartBackoffSeconds = (int)UsbHyperVProxyRestartBackoffInterval.TotalSeconds
+                    },
+                    scopeKey: "attached-backoff",
+                    minInterval: RecurringWarnRateLimitInterval);
+                return;
+            }
+
+            GuestLogger.Warn("usb.transport.hyperv.self_heal.forced_attached", "Hyper-V Socket Selbstheilung wird trotz USB-Attach erzwungen (anhaltender Transportausfall).", new
+            {
+                failureCount = _usbHyperVSocketProbeFailureCount,
+                threshold = UsbHyperVProbeFailureThresholdBeforeRestart,
+                attachedBusIds,
+                lastDataPathSuccessAgeSeconds,
+                consecutiveDataPathFailures = _hyperVDataPathConsecutiveFailures,
+                restartBackoffSeconds = (int)UsbHyperVProxyRestartBackoffInterval.TotalSeconds
+            });
         }
 
-        var now = DateTimeOffset.UtcNow;
-        if ((now - _usbHyperVSocketProxyLastRestartAttemptUtc) < UsbHyperVProxyRestartBackoffInterval)
+        if (restartBackoffActive)
         {
             return;
         }
@@ -4876,6 +4925,43 @@ public sealed partial class App : Application
                 },
                 scopeKey,
                 TimeSpan.FromMinutes(10));
+        }
+    }
+
+    private async Task TrySendUsbStaleExportHintAsync(string busId, UsbHostResolution hostResolution, string operationId, long elapsedMs)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (_usbStaleExportHintLastSentUtc.TryGetValue(normalizedBusId, out var lastSentUtc)
+            && (now - lastSentUtc) < UsbStaleExportHintMinInterval)
+        {
+            return;
+        }
+
+        _usbStaleExportHintLastSentUtc[normalizedBusId] = now;
+
+        try
+        {
+            await TrySendUsbConnectionEventAckAsync(normalizedBusId, "usb-export-stale-suspect", CancellationToken.None);
+            GuestLogger.Debug("usb.connect.stale_export_hint_sent", "Stale-Export-Hinweis an Host gesendet.", new
+            {
+                operationId,
+                busId = normalizedBusId,
+                elapsedMs,
+                hostAddress = hostResolution.ResolvedIpv4,
+                hostSource = hostResolution.Source,
+                transportPath = string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase)
+                    ? "hyperv"
+                    : "ip-fallback"
+            });
+        }
+        catch
+        {
         }
     }
 

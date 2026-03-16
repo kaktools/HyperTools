@@ -24,9 +24,23 @@ public sealed class HyperToolConfig
 
     public MonitoringSettings Monitoring { get; set; } = new();
 
+    public CheckpointSettings Checkpoints { get; set; } = new();
+
     public string DefaultVmImportDestinationPath { get; set; } = string.Empty;
 
     public static HyperToolConfig CreateDefault() => new();
+}
+
+public sealed class CheckpointSettings
+{
+    public List<CheckpointDescriptionOverrideEntry> DescriptionOverrides { get; set; } = [];
+}
+
+public sealed class CheckpointDescriptionOverrideEntry
+{
+    public string Key { get; set; } = string.Empty;
+
+    public string Description { get; set; } = string.Empty;
 }
 
 public sealed class HnsSettings

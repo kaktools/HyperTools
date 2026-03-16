@@ -29,6 +29,7 @@ namespace HyperTool.WinUI;
 public sealed partial class App : Application
 {
     private const int HostUsbAutoRefreshSeconds = 5;
+    private static readonly TimeSpan HostUsbTunnelSelfHealBackoff = TimeSpan.FromSeconds(20);
     private const int UsbDisconnectDebounceMilliseconds = 4500;
     private const string SingleInstanceMutexName = @"Local\HyperTool.WinUI.SingleInstance";
     private const string SingleInstancePipeName = "HyperTool.WinUI.SingleInstance.Activate";
@@ -83,6 +84,8 @@ public sealed partial class App : Application
     private DateTimeOffset? _sharedFolderFileServiceLastActivityUtc;
     private readonly object _usbDisconnectDebounceSync = new();
     private readonly Dictionary<string, CancellationTokenSource> _pendingUsbDisconnectDebounceByKey = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _lastHostUsbTunnelSelfHealAttemptUtc = DateTimeOffset.MinValue;
+    private int _hostUsbTunnelSelfHealFailureCount;
 
     private MainWindow? _mainWindow;
     private MainViewModel? _mainViewModel;
@@ -2210,7 +2213,15 @@ public sealed partial class App : Application
             TriggerHostUsbRefreshForDiagnosticsEvent();
         }
 
-        if (!string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase))
+        if (_mainViewModel is not null
+            && !string.IsNullOrWhiteSpace(ack.BusId)
+            && string.Equals(ack.EventType, "usb-export-stale-suspect", StringComparison.OrdinalIgnoreCase))
+        {
+            _ = _mainViewModel.HandleUsbStaleExportHintAsync(ack.BusId, ack.SourceVmId, ack.GuestComputerName);
+        }
+
+        if (!string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(ack.EventType, "usb-export-stale-suspect", StringComparison.OrdinalIgnoreCase))
         {
             Log.Information(
                 isThemeRestart
@@ -2473,6 +2484,8 @@ public sealed partial class App : Application
             return;
         }
 
+        TrySelfHealHostUsbTunnelIfNeeded();
+
         var hyperVActiveText = _usbHostTunnel?.IsRunning == true ? "Ja" : "Nein";
         var missingServiceIds = GetMissingHyperVSocketServiceIds();
         var registryText = missingServiceIds.Count == 0 ? "Ja" : "Nein";
@@ -2511,6 +2524,62 @@ public sealed partial class App : Application
         }
 
         apply();
+    }
+
+    private void TrySelfHealHostUsbTunnelIfNeeded()
+    {
+        if (_isExitRequested || _isThemeWindowReopenInProgress)
+        {
+            return;
+        }
+
+        if (_usbHostTunnel?.IsRunning == true)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if ((now - _lastHostUsbTunnelSelfHealAttemptUtc) < HostUsbTunnelSelfHealBackoff)
+        {
+            return;
+        }
+
+        _lastHostUsbTunnelSelfHealAttemptUtc = now;
+
+        try
+        {
+            _usbDiagnosticsHostListener?.Dispose();
+            _usbDiagnosticsHostListener = null;
+            _usbHostTunnel?.Dispose();
+            _usbHostTunnel = null;
+
+            _usbHostTunnel = new HyperVSocketUsbHostTunnel();
+            _usbHostTunnel.Start();
+            _usbDiagnosticsHostListener = new HyperVSocketDiagnosticsHostListener(ack => ProcessDiagnosticsAck(ack, isThemeRestart: false));
+            _usbDiagnosticsHostListener.Start();
+
+            if (_hostUsbTunnelSelfHealFailureCount > 0)
+            {
+                Log.Information(
+                    "Host USB Hyper-V tunnel self-heal succeeded after previous failures. PreviousFailures={FailureCount}",
+                    _hostUsbTunnelSelfHealFailureCount);
+            }
+            else
+            {
+                Log.Information("Host USB Hyper-V tunnel self-heal executed successfully.");
+            }
+
+            _hostUsbTunnelSelfHealFailureCount = 0;
+        }
+        catch (Exception ex)
+        {
+            _hostUsbTunnelSelfHealFailureCount++;
+            Log.Warning(
+                ex,
+                "Host USB Hyper-V tunnel self-heal failed. Attempt={Attempt}; BackoffSeconds={BackoffSeconds}",
+                _hostUsbTunnelSelfHealFailureCount,
+                (int)HostUsbTunnelSelfHealBackoff.TotalSeconds);
+        }
     }
 
     private void RegisterGlobalExceptionHandlers()

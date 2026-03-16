@@ -928,6 +928,9 @@ public sealed class HyperVPowerShellService : IHyperVService
 
     public async Task CreateCheckpointAsync(string vmName, string checkpointName, string? description, CancellationToken cancellationToken)
     {
+        var operationStartedUtc = DateTime.UtcNow;
+        var checkpointCountBefore = await TryGetCheckpointNameCountAsync(vmName, checkpointName, cancellationToken);
+
         var vmNameQuoted = ToPsSingleQuoted(vmName);
         var checkpointNameQuoted = ToPsSingleQuoted(checkpointName);
         var descriptionText = string.IsNullOrWhiteSpace(description) ? string.Empty : description.Trim();
@@ -951,32 +954,96 @@ public sealed class HyperVPowerShellService : IHyperVService
 
         try
         {
-            await InvokeNonQueryAsync(
-                "$vmName = " + vmNameQuoted + "; " +
-                "$checkpointName = " + checkpointNameQuoted + "; " +
-                "Checkpoint-VM -VMName $vmName -SnapshotName $checkpointName -Confirm:$false; " +
-                setDescriptionScript,
-                cancellationToken);
+            try
+            {
+                await InvokeNonQueryAsync(
+                    "$vmName = " + vmNameQuoted + "; " +
+                    "$checkpointName = " + checkpointNameQuoted + "; " +
+                    "Checkpoint-VM -VMName $vmName -SnapshotName $checkpointName -Confirm:$false; " +
+                    setDescriptionScript,
+                    cancellationToken);
+            }
+            catch (InvalidOperationException ex) when (IsProductionCheckpointError(ex.Message))
+            {
+                Log.Warning(ex,
+                    "Production checkpoint creation failed for VM {VmName}. Retrying once with temporary Standard checkpoint type.",
+                    vmName);
+
+                var fallbackScript = $"$vmName = {vmNameQuoted}; " +
+                                     $"$checkpointName = {checkpointNameQuoted}; " +
+                                     "$vm = Get-VM -Name $vmName; " +
+                                     "$originalType = $vm.CheckpointType; " +
+                                     "try { " +
+                                     "Set-VM -Name $vmName -CheckpointType Standard; " +
+                                     "Checkpoint-VM -VMName $vmName -SnapshotName $checkpointName -Confirm:$false; " +
+                                     setDescriptionScript +
+                                     "} finally { " +
+                                     "if ($null -ne $originalType) { Set-VM -Name $vmName -CheckpointType $originalType } " +
+                                     "}";
+
+                await InvokeNonQueryAsync(fallbackScript, cancellationToken);
+            }
         }
-        catch (InvalidOperationException ex) when (IsProductionCheckpointError(ex.Message))
+        catch (InvalidOperationException ex)
         {
-            Log.Warning(ex,
-                "Production checkpoint creation failed for VM {VmName}. Retrying once with temporary Standard checkpoint type.",
-                vmName);
+            if (await WasCheckpointCreatedDespiteErrorAsync(vmName, checkpointName, operationStartedUtc, checkpointCountBefore, cancellationToken))
+            {
+                Log.Warning(ex,
+                    "Checkpoint create command reported an error but checkpoint exists. Treating as success. VmName={VmName}; CheckpointName={CheckpointName}",
+                    vmName,
+                    checkpointName);
+                return;
+            }
 
-            var fallbackScript = $"$vmName = {vmNameQuoted}; " +
-                                 $"$checkpointName = {checkpointNameQuoted}; " +
-                                 "$vm = Get-VM -Name $vmName; " +
-                                 "$originalType = $vm.CheckpointType; " +
-                                 "try { " +
-                                 "Set-VM -Name $vmName -CheckpointType Standard; " +
-                                 "Checkpoint-VM -VMName $vmName -SnapshotName $checkpointName -Confirm:$false; " +
-                                 setDescriptionScript +
-                                 "} finally { " +
-                                 "if ($null -ne $originalType) { Set-VM -Name $vmName -CheckpointType $originalType } " +
-                                 "}";
+            throw;
+        }
+    }
 
-            await InvokeNonQueryAsync(fallbackScript, cancellationToken);
+    private async Task<int?> TryGetCheckpointNameCountAsync(string vmName, string checkpointName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var checkpoints = await GetCheckpointsAsync(vmName, cancellationToken);
+            return checkpoints.Count(item => string.Equals(item.Name, checkpointName, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> WasCheckpointCreatedDespiteErrorAsync(
+        string vmName,
+        string checkpointName,
+        DateTime operationStartedUtc,
+        int? checkpointCountBefore,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var checkpoints = await GetCheckpointsAsync(vmName, cancellationToken);
+            var matching = checkpoints
+                .Where(item => string.Equals(item.Name, checkpointName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (matching.Count == 0)
+            {
+                return false;
+            }
+
+            if (checkpointCountBefore.HasValue && matching.Count > checkpointCountBefore.Value)
+            {
+                return true;
+            }
+
+            // Fallback when baseline count was unavailable or unchanged: accept entries
+            // created around operation start to avoid false error notifications.
+            return matching.Any(item => item.Created != DateTime.MinValue
+                                        && item.Created >= operationStartedUtc.AddMinutes(-1));
+        }
+        catch
+        {
+            return false;
         }
     }
 

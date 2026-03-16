@@ -177,6 +177,47 @@ public static class UsbGuestConnectionRegistry
         return true;
     }
 
+    public static bool TryGetGuestComputerNameBySourceVmId(string? sourceVmId, out string guestComputerName, TimeSpan? maxAge = null)
+    {
+        guestComputerName = string.Empty;
+
+        var normalizedVmId = (sourceVmId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmId))
+        {
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        GuestConnectionEntry? newestMatch = null;
+
+        foreach (var entry in ConnectedGuestsByDeviceKey.Values)
+        {
+            if (!string.Equals(entry.SourceVmId, normalizedVmId, StringComparison.OrdinalIgnoreCase)
+                || string.IsNullOrWhiteSpace(entry.GuestComputerName))
+            {
+                continue;
+            }
+
+            if (maxAge.HasValue && (now - entry.LastSeenUtc) > maxAge.Value)
+            {
+                continue;
+            }
+
+            if (newestMatch is null || entry.LastSeenUtc > newestMatch.LastSeenUtc)
+            {
+                newestMatch = entry;
+            }
+        }
+
+        if (newestMatch is null)
+        {
+            return false;
+        }
+
+        guestComputerName = newestMatch.GuestComputerName;
+        return true;
+    }
+
     public static bool TryGetFreshGuestComputerName(string? busId, TimeSpan maxAge, out string guestComputerName)
     {
         guestComputerName = string.Empty;
