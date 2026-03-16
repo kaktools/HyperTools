@@ -9,6 +9,8 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 - Host-USB-Auto-Detach nutzt jetzt eine klare Trigger-Policy: nur bei Guest-Disconnect oder wenn die zugehörige VM-ID mindestens 10 Sekunden nicht läuft.
 - In der Host-USB-Leiste gibt es einen dedizierten `Detach`-Button direkt neben `Share` und `Unshare`.
 - Der UI-Schalter für automatisches Detach wurde entfernt; die Option ist weiterhin per Config steuerbar.
+- Detach (manuell + Auto-Detach) läuft im Host ohne zusätzliche UAC-Elevation.
+- Recovery bei stale Exports ist wieder begrenzt aktiv: Retry/Grace/Delay aus der Host-Config plus Guest-Signal bei wiederholtem `already exported`.
 
 ## Projekte
 
@@ -109,6 +111,9 @@ Versteckte/erweiterte Option (nur per `HyperTool.config.json`):
 
 - ui.numLockWatcherIntervalSeconds (Default: `30`, Bereich: `5..600`)
 - usb.autoDetachOnClientDisconnect (Default: `true`)
+- usb.autoDetachRetryAttempts (Default: `3`, Bereich: `1..10`)
+- usb.autoDetachGracePeriodSeconds (Default: `90`, Bereich: `5..300`)
+- usb.autoDetachRetryDelayMs (Default: `450`, Bereich: `100..5000`)
 
 ### Shared-Folder Transport (Guest)
 
@@ -146,6 +151,7 @@ Hinweis zur Zuständigkeit:
 ## Rechtehinweis
 
 - Nicht alle Funktionen benötigen Adminrechte.
-- Hyper-V- und USB-Operationen können erhöhte Rechte/UAC erfordern.
+- Hyper-V-Operationen können erhöhte Rechte/UAC erfordern.
+- USB-Detach (manuell und Auto-Detach) funktioniert ohne zusätzliche UAC-Elevation durch HyperTool.
 
 

@@ -7,6 +7,7 @@
 - Snapshot-Beschreibungen bleiben jetzt auch nach App-Neustart und Reload zuverlässig erhalten.
 - USB-Auto-Detach im Host wurde auf einen klaren, deterministischen Ablauf reduziert: nur bei Guest-Disconnect-Event oder wenn die zugehörige VM (per VM-ID) mindestens 10 Sekunden nicht läuft.
 - USB-UI im Host ist eindeutiger: eigener `Detach`-Button direkt neben `Share` und `Unshare`; der Auto-Detach-Schalter wurde aus der Oberfläche entfernt.
+- Detach im Host (manuell + Auto-Detach) läuft ohne zusätzliche UAC-Elevation.
 
 ### Verbessert
 
@@ -17,14 +18,19 @@
 	- Zyklische Guest-ACK-/Liveness-basierte Auto-Detach-Heuristiken wurden entfernt.
 	- Auto-Detach ist auf explizite Trigger beschränkt (`usb-disconnected` oder VM-ID nicht Running >= 10s).
 	- Bei fehlgeschlagenem Auto-Detach bleibt der manuelle Weg (`Detach`/`Unshare`) als kontrollierter Fallback erhalten.
+	- Für diese Trigger nutzt der Host wieder konfigurierbare Retry/Grace/Delay-Werte (`usb.autoDetachRetryAttempts`, `usb.autoDetachGracePeriodSeconds`, `usb.autoDetachRetryDelayMs`).
 - Host USB UX:
 	- Neuer `Detach`-Button in der Aktionsleiste (neben `Share`/`Unshare`).
 	- Einstellung `Automatisches Detach nach Disconnect` ist nicht mehr per UI umschaltbar und wird nur noch über die Config gesteuert.
+- Guest Stale-Export-Recovery:
+	- Bei wiederholtem `already exported` + lokal `not attached` sendet der Guest ein gezieltes `usb-disconnected` Signal an den Host.
+	- Dadurch kann der Host den stale Attach per Auto-Detach-Retry-Kette lösen, ohne alte zyklische Liveness-Checks wieder einzuführen.
 
 ### Behoben
 
 - Snapshot-Beschreibungen gingen nach Reload/Neustart verloren, obwohl der Snapshot selbst vorhanden war.
 - USB-Stale-Recovery reagierte in Grenzfällen zu aggressiv durch zyklische Liveness-Logik; die Detach-Entscheidung folgt jetzt nur noch den klar definierten Triggern.
+- UAC-Anforderung für Host-Detach entfällt; Detach wird ohne zusätzliche Elevation ausgeführt.
 
 ### Doku
 
