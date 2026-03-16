@@ -147,7 +147,6 @@ public sealed class MainWindow : Window
     private readonly SemaphoreSlim _sharedFolderEnabledToggleGate = new(1, 1);
     private bool _sharedFolderCollectionHandlersAttached;
     private readonly CheckBox _usbAutoShareCheckBox = new();
-    private readonly CheckBox _usbAutoDetachOnDisconnectCheckBox = new();
     private readonly CheckBox _usbUnshareOnExitCheckBox = new();
     private readonly ToggleSwitch _usbHostFeatureEnabledToggleSwitch = new() { Header = null, OffContent = "", OnContent = "" };
     private readonly Border _usbHostFeatureStatusChip = new() { CornerRadius = new CornerRadius(9), MinHeight = 30, BorderThickness = new Thickness(1), Padding = new Thickness(10, 5, 10, 5), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
@@ -167,6 +166,7 @@ public sealed class MainWindow : Window
     private Button? _usbRefreshButton;
     private Button? _usbShareButton;
     private Button? _usbUnshareButton;
+    private Button? _usbDetachButton;
     private Button? _mountIsoButton;
     private Button? _unmountIsoButton;
     private Button? _vmHostNetworkProfileActionButton;
@@ -3009,6 +3009,7 @@ public sealed class MainWindow : Window
         _usbRefreshButton = CreateIconButton("⟳", "Refresh", _viewModel.RefreshUsbDevicesCommand);
         _usbShareButton = CreateIconButton("🔓", "Share", _viewModel.BindUsbDeviceCommand);
         _usbUnshareButton = CreateIconButton("🔒", "Unshare", _viewModel.UnbindUsbDeviceCommand);
+        _usbDetachButton = CreateIconButton("⏏", "Detach", _viewModel.DetachUsbDeviceCommand);
 
         Grid.SetColumn(_usbRefreshButton, 0);
         actionRow.Children.Add(_usbRefreshButton);
@@ -3016,6 +3017,8 @@ public sealed class MainWindow : Window
         actionRow.Children.Add(_usbShareButton);
         Grid.SetColumn(_usbUnshareButton, 2);
         actionRow.Children.Add(_usbUnshareButton);
+        Grid.SetColumn(_usbDetachButton, 3);
+        actionRow.Children.Add(_usbDetachButton);
 
         _usbFeatureControlsPanel.Children.Add(actionRow);
 
@@ -3027,18 +3030,8 @@ public sealed class MainWindow : Window
         _usbAutoShareCheckBox.IsEnabled = _viewModel.SelectedUsbDevice is not null && _viewModel.UsbRuntimeAvailable;
         _usbAutoShareCheckBox.Checked += (_, _) => _viewModel.SelectedUsbDeviceAutoShareEnabled = true;
         _usbAutoShareCheckBox.Unchecked += (_, _) => _viewModel.SelectedUsbDeviceAutoShareEnabled = false;
-        Grid.SetColumn(_usbAutoShareCheckBox, 3);
+        Grid.SetColumn(_usbAutoShareCheckBox, 4);
         actionRow.Children.Add(_usbAutoShareCheckBox);
-
-        _usbAutoDetachOnDisconnectCheckBox.Content = "Automatisches Detach nach Disconnect";
-        _usbAutoDetachOnDisconnectCheckBox.Margin = new Thickness(6, 0, 0, 0);
-        _usbAutoDetachOnDisconnectCheckBox.VerticalAlignment = VerticalAlignment.Center;
-        _usbAutoDetachOnDisconnectCheckBox.HorizontalAlignment = HorizontalAlignment.Left;
-        _usbAutoDetachOnDisconnectCheckBox.IsChecked = _viewModel.UsbAutoDetachOnClientDisconnect;
-        _usbAutoDetachOnDisconnectCheckBox.Checked += (_, _) => _viewModel.UsbAutoDetachOnClientDisconnect = true;
-        _usbAutoDetachOnDisconnectCheckBox.Unchecked += (_, _) => _viewModel.UsbAutoDetachOnClientDisconnect = false;
-        Grid.SetColumn(_usbAutoDetachOnDisconnectCheckBox, 4);
-        actionRow.Children.Add(_usbAutoDetachOnDisconnectCheckBox);
 
         _usbUnshareOnExitCheckBox.Content = "Beim Beenden Share aufheben";
         _usbUnshareOnExitCheckBox.Margin = new Thickness(6, 0, 0, 0);
@@ -5934,11 +5927,6 @@ public sealed class MainWindow : Window
             UpdateHostFeatureAvailabilityUi();
         }
 
-        if (string.Equals(e.PropertyName, nameof(MainViewModel.UsbAutoDetachOnClientDisconnect), StringComparison.Ordinal))
-        {
-            _usbAutoDetachOnDisconnectCheckBox.IsChecked = _viewModel.UsbAutoDetachOnClientDisconnect;
-        }
-
         if (string.Equals(e.PropertyName, nameof(MainViewModel.UsbUnshareOnExit), StringComparison.Ordinal))
         {
             _usbUnshareOnExitCheckBox.IsChecked = _viewModel.UsbUnshareOnExit;
@@ -6090,7 +6078,11 @@ public sealed class MainWindow : Window
             _usbUnshareButton.IsEnabled = usbInteractive;
         }
 
-        _usbAutoDetachOnDisconnectCheckBox.IsEnabled = usbInteractive;
+        if (_usbDetachButton is not null)
+        {
+            _usbDetachButton.IsEnabled = usbInteractive;
+        }
+
         _usbUnshareOnExitCheckBox.IsEnabled = usbInteractive;
 
         _usbHostFeatureEnabledToggleSwitch.IsEnabled = usbRuntimeAvailable;

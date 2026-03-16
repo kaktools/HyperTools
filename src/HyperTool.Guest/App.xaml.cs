@@ -2663,7 +2663,6 @@ public sealed partial class App : Application
                     scopeKey: busId.Trim().ToLowerInvariant(),
                     minInterval: RecurringWarnRateLimitInterval);
 
-                await TrySendUsbStaleExportHintAsync(busId, hostResolution, operationId, stopwatch.ElapsedMilliseconds);
             }
 
             if (ShouldRetryUsbAttach(ex))

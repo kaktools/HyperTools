@@ -2213,13 +2213,6 @@ public sealed partial class App : Application
             TriggerHostUsbRefreshForDiagnosticsEvent();
         }
 
-        if (_mainViewModel is not null
-            && !string.IsNullOrWhiteSpace(ack.BusId)
-            && string.Equals(ack.EventType, "usb-export-stale-suspect", StringComparison.OrdinalIgnoreCase))
-        {
-            _ = _mainViewModel.HandleUsbStaleExportHintAsync(ack.BusId, ack.SourceVmId, ack.GuestComputerName);
-        }
-
         if (!string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(ack.EventType, "usb-export-stale-suspect", StringComparison.OrdinalIgnoreCase))
         {
