@@ -30,9 +30,9 @@ public sealed partial class App : Application
     private const int GuestHostIdentityUsbRefreshSeconds = 8;
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
     private const int GuestUsbHeartbeatIntervalSeconds = 45;
+    private const int GuestStaleExportDisconnectSignalThreshold = 3;
+    private const int GuestStaleExportDisconnectSignalMinAgeSeconds = 30;
     private const int HyperVProbeGraceAfterDataPathSuccessSeconds = 180;
-    private const int HyperVForcedSelfHealStaleSeconds = 480;
-    private const int HyperVForcedSelfHealProbeFailureMultiplier = 2;
     private static readonly TimeSpan UsbRefreshSuccessLogHeartbeatInterval = TimeSpan.FromSeconds(45);
     private const int UsbHyperVProbeFailureThresholdBeforeRestart = 12;
     private static readonly TimeSpan UsbHyperVProxyRestartBackoffInterval = TimeSpan.FromSeconds(90);
@@ -118,6 +118,7 @@ public sealed partial class App : Application
     private readonly Dictionary<string, UsbDeviceAttachmentEntry> _hostUsbAttachmentsByBusId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbAutoConnectBackoffUntilUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbHeartbeatLastSentByBusId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count, DateTimeOffset LastSignalUtc)> _usbAlreadyExportedNotAttachedStateByBusId = new(StringComparer.OrdinalIgnoreCase);
     private string? _selectedUsbBusId;
     private bool _isUsbClientAvailable;
     private bool _usbClientMissingLogged;
@@ -2583,6 +2584,7 @@ public sealed partial class App : Application
         {
             await _usbService.AttachToHostAsync(busId, hostResolution.ResolvedIpv4, CancellationToken.None);
             _selectedUsbBusId = busId;
+            _usbAlreadyExportedNotAttachedStateByBusId.Remove(busId);
             ApplyUsbTransportResolution(hostResolution);
 
             GuestLogger.Info("usb.connect.success", "USB Host-Attach erfolgreich.", new
@@ -2625,6 +2627,7 @@ public sealed partial class App : Application
                     await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
 
                     _selectedUsbBusId = busId;
+                    _usbAlreadyExportedNotAttachedStateByBusId.Remove(busId);
                     ApplyUsbTransportResolution(hostResolution);
 
                     GuestLogger.Info("usb.connect.success", "USB Host-Attach bereits aktiv (already exported).", new
@@ -2663,6 +2666,8 @@ public sealed partial class App : Application
                     scopeKey: busId.Trim().ToLowerInvariant(),
                     minInterval: RecurringWarnRateLimitInterval);
 
+                await TrySignalStaleAlreadyExportedDisconnectAsync(busId, operationId, hostResolution, stopwatch.ElapsedMilliseconds);
+
             }
 
             if (ShouldRetryUsbAttach(ex))
@@ -2684,6 +2689,7 @@ public sealed partial class App : Application
 
                     await TryRecoverAndRetryUsbAttachAsync(busId, hostResolution.ResolvedIpv4, CancellationToken.None);
                     _selectedUsbBusId = busId;
+                    _usbAlreadyExportedNotAttachedStateByBusId.Remove(busId);
                     ApplyUsbTransportResolution(hostResolution);
 
                     GuestLogger.Info("usb.connect.success", "USB Host-Attach erfolgreich (Retry).", new
@@ -2728,6 +2734,7 @@ public sealed partial class App : Application
                     {
                         await _usbService.AttachToHostAsync(busId, ipFallbackResolution.ResolvedIpv4, CancellationToken.None);
                         _selectedUsbBusId = busId;
+                        _usbAlreadyExportedNotAttachedStateByBusId.Remove(busId);
                         ApplyUsbTransportResolution(ipFallbackResolution, fallbackToIp: true);
 
                         GuestLogger.Info("usb.connect.success", "USB Host-Attach erfolgreich (IP-Fallback).", new
@@ -2789,6 +2796,72 @@ public sealed partial class App : Application
 
         await Task.Delay(TimeSpan.FromMilliseconds(850), cancellationToken);
         await _usbService.AttachToHostAsync(busId, hostAddress, cancellationToken);
+    }
+
+    private async Task TrySignalStaleAlreadyExportedDisconnectAsync(string busId, string operationId, UsbHostResolution hostResolution, long elapsedMs)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var state = _usbAlreadyExportedNotAttachedStateByBusId.TryGetValue(normalizedBusId, out var existing)
+            ? existing
+            : (FirstSeenUtc: now, LastSeenUtc: now, Count: 0, LastSignalUtc: DateTimeOffset.MinValue);
+
+        state = (state.FirstSeenUtc, now, state.Count + 1, state.LastSignalUtc);
+        _usbAlreadyExportedNotAttachedStateByBusId[normalizedBusId] = state;
+
+        if (state.Count < GuestStaleExportDisconnectSignalThreshold)
+        {
+            return;
+        }
+
+        if ((now - state.FirstSeenUtc) < TimeSpan.FromSeconds(GuestStaleExportDisconnectSignalMinAgeSeconds))
+        {
+            return;
+        }
+
+        if (state.LastSignalUtc != DateTimeOffset.MinValue
+            && (now - state.LastSignalUtc) < UsbStaleExportHintMinInterval)
+        {
+            return;
+        }
+
+        try
+        {
+            await TrySendUsbConnectionEventAckAsync(normalizedBusId, "usb-disconnected", CancellationToken.None);
+
+            state = (state.FirstSeenUtc, state.LastSeenUtc, state.Count, now);
+            _usbAlreadyExportedNotAttachedStateByBusId[normalizedBusId] = state;
+
+            GuestLogger.Warn("usb.connect.already_exported.recovery_signal_sent", "Stale-Export-Verdacht bestätigt: usb-disconnected Signal an Host gesendet.", new
+            {
+                operationId,
+                busId = normalizedBusId,
+                elapsedMs,
+                count = state.Count,
+                threshold = GuestStaleExportDisconnectSignalThreshold,
+                firstSeenAgeSeconds = (int)Math.Clamp((now - state.FirstSeenUtc).TotalSeconds, 0, int.MaxValue),
+                hostAddress = hostResolution.ResolvedIpv4,
+                hostSource = hostResolution.Source,
+                transportPath = string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase)
+                    ? "hyperv"
+                    : "ip-fallback"
+            });
+        }
+        catch (Exception ex)
+        {
+            GuestLogger.Debug("usb.connect.already_exported.recovery_signal_failed", ex.Message, new
+            {
+                operationId,
+                busId = normalizedBusId,
+                count = state.Count,
+                exceptionType = ex.GetType().FullName
+            });
+        }
     }
 
     private static bool ShouldRetryUsbAttach(Exception exception)
@@ -4610,18 +4683,6 @@ public sealed partial class App : Application
 
         if (attachedBusIds.Count > 0)
         {
-            var lastDataPathSuccessAgeSeconds = _lastHyperVDataPathSuccessUtc == DateTimeOffset.MinValue
-                ? int.MaxValue
-                : (int)Math.Clamp((now - _lastHyperVDataPathSuccessUtc).TotalSeconds, 0, int.MaxValue);
-
-            var persistentTransportFailure =
-                _usbHyperVSocketProbeFailureCount >= (UsbHyperVProbeFailureThresholdBeforeRestart * HyperVForcedSelfHealProbeFailureMultiplier)
-                && _hyperVDataPathConsecutiveFailures >= 3
-                && !HasRecentHyperVDataPathSuccess()
-                && lastDataPathSuccessAgeSeconds >= HyperVForcedSelfHealStaleSeconds;
-
-            if (!persistentTransportFailure)
-            {
             WarnRateLimited(
                 eventName: "usb.transport.hyperv.self_heal.skipped_attached",
                 message: "Hyper-V Socket Selbstheilung ausgesetzt, solange USB im Guest verbunden ist.",
@@ -4634,36 +4695,7 @@ public sealed partial class App : Application
                 },
                 scopeKey: "attached",
                 minInterval: RecurringWarnRateLimitInterval);
-                return;
-            }
-
-            if (restartBackoffActive)
-            {
-                WarnRateLimited(
-                    eventName: "usb.transport.hyperv.self_heal.delayed_attached",
-                    message: "Hyper-V Socket Selbstheilung wird trotz USB-Attach verschoben (Restart-Backoff aktiv).",
-                    data: new
-                    {
-                        failureCount = _usbHyperVSocketProbeFailureCount,
-                        threshold = UsbHyperVProbeFailureThresholdBeforeRestart,
-                        attachedBusIds,
-                        lastDataPathSuccessAgeSeconds,
-                        restartBackoffSeconds = (int)UsbHyperVProxyRestartBackoffInterval.TotalSeconds
-                    },
-                    scopeKey: "attached-backoff",
-                    minInterval: RecurringWarnRateLimitInterval);
-                return;
-            }
-
-            GuestLogger.Warn("usb.transport.hyperv.self_heal.forced_attached", "Hyper-V Socket Selbstheilung wird trotz USB-Attach erzwungen (anhaltender Transportausfall).", new
-            {
-                failureCount = _usbHyperVSocketProbeFailureCount,
-                threshold = UsbHyperVProbeFailureThresholdBeforeRestart,
-                attachedBusIds,
-                lastDataPathSuccessAgeSeconds,
-                consecutiveDataPathFailures = _hyperVDataPathConsecutiveFailures,
-                restartBackoffSeconds = (int)UsbHyperVProxyRestartBackoffInterval.TotalSeconds
-            });
+            return;
         }
 
         if (restartBackoffActive)

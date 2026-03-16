@@ -2270,7 +2270,19 @@ public partial class MainViewModel : ViewModelBase
 
             try
             {
-                await _usbIpService.DetachAsync(busId, token);
+                var detached = await TryDetachBusWithRetryAsync(
+                    busId,
+                    initialDelay: TimeSpan.Zero,
+                    token,
+                    context: "vm-not-running");
+
+                if (!detached)
+                {
+                    _usbVmNotRunningSinceUtc.Remove(busId);
+                    _usbVmOffDetachManualRequiredBusIds.Add(busId);
+                    continue;
+                }
+
                 _usbVmNotRunningSinceUtc.Remove(busId);
                 _usbVmOffDetachManualRequiredBusIds.Remove(busId);
                 detachedCount++;
@@ -2887,10 +2899,6 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var busId = SelectedUsbDevice.BusId;
-        if (!IsProcessElevated())
-        {
-            AddNotification("UAC wird angefordert für USB Detach...", "Info");
-        }
 
         await ExecuteBusyActionAsync($"USB-Gerät {busId} wird getrennt...", async token =>
         {
@@ -4945,10 +4953,18 @@ public partial class MainViewModel : ViewModelBase
             await _usbTrayRefreshGate.WaitAsync(_lifetimeCancellation.Token);
             gateEntered = true;
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
-            cts.CancelAfter(TimeSpan.FromSeconds(12));
+            var detached = await TryDetachBusWithRetryAsync(
+                normalizedBusId,
+                initialDelay: _usbAutoDetachGracePeriod,
+                _lifetimeCancellation.Token,
+                context: "guest-disconnected");
 
-            await _usbIpService.DetachAsync(normalizedBusId, cts.Token);
+            if (!detached)
+            {
+                Log.Warning("Automatic USB detach after guest disconnect event failed after retries. Manual detach/unshare may be required. BusId={BusId}", normalizedBusId);
+                return;
+            }
+
             _usbVmNotRunningSinceUtc.Remove(normalizedBusId);
             _usbVmOffDetachManualRequiredBusIds.Remove(normalizedBusId);
 
@@ -4992,6 +5008,92 @@ public partial class MainViewModel : ViewModelBase
                || text.Contains("already detached", StringComparison.OrdinalIgnoreCase)
                || text.Contains("is not attached", StringComparison.OrdinalIgnoreCase)
                || text.Contains("does not exist", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<bool> TryDetachBusWithRetryAsync(string busId, TimeSpan initialDelay, CancellationToken token, string context)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return false;
+        }
+
+        if (initialDelay > TimeSpan.Zero)
+        {
+            await Task.Delay(initialDelay, token);
+        }
+
+        var attempts = Math.Clamp(_usbAutoDetachRetryAttempts, 1, 10);
+        var retryDelay = _usbAutoDetachRetryDelay <= TimeSpan.Zero
+            ? TimeSpan.FromMilliseconds(450)
+            : _usbAutoDetachRetryDelay;
+
+        Exception? lastException = null;
+
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+
+            try
+            {
+                await _usbIpService.DetachAsync(normalizedBusId, token);
+
+                if (attempt > 1)
+                {
+                    Log.Information(
+                        "USB detach succeeded after retry. Context={Context}; BusId={BusId}; Attempt={Attempt}/{Attempts}",
+                        context,
+                        normalizedBusId,
+                        attempt,
+                        attempts);
+                }
+
+                return true;
+            }
+            catch (Exception ex) when (IsUsbDetachNoOpError(ex))
+            {
+                Log.Debug(
+                    "USB detach treated as no-op. Context={Context}; BusId={BusId}; Attempt={Attempt}/{Attempts}",
+                    context,
+                    normalizedBusId,
+                    attempt,
+                    attempts);
+                return true;
+            }
+            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+
+                if (attempt >= attempts)
+                {
+                    break;
+                }
+
+                Log.Debug(
+                    ex,
+                    "USB detach attempt failed. Context={Context}; BusId={BusId}; Attempt={Attempt}/{Attempts}. Retrying in {RetryDelayMs}ms",
+                    context,
+                    normalizedBusId,
+                    attempt,
+                    attempts,
+                    (int)Math.Round(retryDelay.TotalMilliseconds));
+
+                await Task.Delay(retryDelay, token);
+            }
+        }
+
+        Log.Warning(
+            lastException,
+            "USB detach failed after retries. Context={Context}; BusId={BusId}; Attempts={Attempts}",
+            context,
+            normalizedBusId,
+            attempts);
+
+        return false;
     }
 
     public async Task ShareSelectedUsbFromTrayAsync()

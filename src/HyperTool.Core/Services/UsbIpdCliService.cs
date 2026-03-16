@@ -244,13 +244,6 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
     public async Task DetachAsync(string busId, CancellationToken cancellationToken)
     {
         await EnsureReadyAsync(cancellationToken);
-        if (!IsProcessElevated())
-        {
-            var exitCode = await RunCommandElevatedAsync(["detach", "--busid", busId], cancellationToken);
-            EnsureSuccess(exitCode, $"USB-Gerät mit BUSID '{busId}' konnte nicht getrennt werden.");
-            return;
-        }
-
         var result = await RunCommandAsync(["detach", "--busid", busId], cancellationToken);
         EnsureSuccess(result, $"USB-Gerät mit BUSID '{busId}' konnte nicht getrennt werden.");
     }
