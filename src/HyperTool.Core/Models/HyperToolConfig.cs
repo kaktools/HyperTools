@@ -2,7 +2,7 @@ namespace HyperTool.Models;
 
 public sealed class HyperToolConfig
 {
-    public int ConfigSchemaVersion { get; set; } = 2;
+    public int ConfigSchemaVersion { get; set; } = 3;
 
     public string DefaultVmName { get; set; } = string.Empty;
 
@@ -100,7 +100,9 @@ public sealed class UsbSettings
 
     public int AutoDetachRetryAttempts { get; set; } = 3;
 
-    public int AutoDetachGracePeriodSeconds { get; set; } = 90;
+    public int AutoDetachGracePeriodSeconds { get; set; } = 5;
+
+    public bool AutoDetachGraceMigratedToFiveSeconds { get; set; }
 
     public int AutoDetachRetryDelayMs { get; set; } = 450;
 

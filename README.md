@@ -112,7 +112,7 @@ Versteckte/erweiterte Option (nur per `HyperTool.config.json`):
 - ui.numLockWatcherIntervalSeconds (Default: `30`, Bereich: `5..600`)
 - usb.autoDetachOnClientDisconnect (Default: `true`)
 - usb.autoDetachRetryAttempts (Default: `3`, Bereich: `1..10`)
-- usb.autoDetachGracePeriodSeconds (Default: `90`, Bereich: `5..300`)
+- usb.autoDetachGracePeriodSeconds (Default: `5`, Bereich: `5..300`)
 - usb.autoDetachRetryDelayMs (Default: `450`, Bereich: `100..5000`)
 
 ### Shared-Folder Transport (Guest)

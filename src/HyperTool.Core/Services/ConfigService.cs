@@ -7,7 +7,7 @@ namespace HyperTool.Services;
 
 public sealed class ConfigService : IConfigService
 {
-    private const int CurrentConfigSchemaVersion = 2;
+    private const int CurrentConfigSchemaVersion = 3;
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,
@@ -132,6 +132,7 @@ public sealed class ConfigService : IConfigService
     {
         var wasUpdated = false;
         var notices = new List<string>();
+        var originalSchemaVersion = config.ConfigSchemaVersion;
 
         if (config.ConfigSchemaVersion != CurrentConfigSchemaVersion)
         {
@@ -226,6 +227,25 @@ public sealed class ConfigService : IConfigService
         config.SharedFolders ??= new SharedFolderSettings();
         config.Monitoring ??= new MonitoringSettings();
         config.Checkpoints ??= new CheckpointSettings();
+
+        if (originalSchemaVersion < 3 && config.Usb.AutoDetachGracePeriodSeconds != 5)
+        {
+            config.Usb.AutoDetachGracePeriodSeconds = 5;
+            wasUpdated = true;
+            notices.Add("Usb.AutoDetachGracePeriodSeconds wurde bei der Konfigurationsmigration auf den neuen Standardwert 5s gesetzt.");
+        }
+
+        if (!config.Usb.AutoDetachGraceMigratedToFiveSeconds)
+        {
+            if (config.Usb.AutoDetachGracePeriodSeconds != 5)
+            {
+                config.Usb.AutoDetachGracePeriodSeconds = 5;
+                notices.Add("Usb.AutoDetachGracePeriodSeconds wurde einmalig auf 5s migriert.");
+            }
+
+            config.Usb.AutoDetachGraceMigratedToFiveSeconds = true;
+            wasUpdated = true;
+        }
 
         if (config.Checkpoints.DescriptionOverrides is null)
         {

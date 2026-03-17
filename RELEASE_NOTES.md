@@ -1,5 +1,38 @@
 # HyperTool Release Notes
 
+## v2.5.5
+
+### Highlights
+
+- USB-Detach/Refresh im Host wurde für Guest-Disconnect-Fälle deutlich robuster und reaktiver gemacht.
+- Multi-VM-USB-Zuordnung (`Connected By`/`Busy`) ist stabilisiert, auch bei schnellen Disconnect/Connect-Folgen.
+- Guest-Start wurde gegen sporadische Concurrent-Collection-Fehler im USB-Refresh gehärtet.
+- Konfigurationsmigration bereinigt bestehende Installationen stärker und setzt neue USB-Defaults konsistent.
+
+### Verbessert
+
+- Host USB Detach/Refresh:
+	- Explizite `usb-disconnected`-Events aus dem Guest lösen den Host-Detach immer aus (auch wenn der Auto-Detach-Config-Schalter deaktiviert ist).
+	- Für explizite Guest-Disconnects entfällt die zusätzliche lange Grace-Wartezeit; nach Debounce erfolgt der Detach zeitnah.
+	- Während des Disconnect-Pfads blockiert die Grace-Phase keine regulären USB-Refreshes mehr.
+	- Physisch entfernte Geräte (`Attached` ohne `Connected`) werden beim Host-Refresh automatisch detacht.
+	- `usbipd`-Fehler `There is no device with busid ...` wird als No-Op behandelt.
+- Multi-VM USB-Zuordnung:
+	- `usb-disconnected` für Gerät A entfernt nicht mehr versehentlich die `Connected By`-Zuordnung von Gerät B mit ähnlichem Hardware-Profil.
+	- Ack-Identity priorisiert `busid` vor `hardware`, um Kollisionen zu reduzieren.
+	- Guest-Share-Liste hält Geräte mit Host-Attachment-Hinweis weiter als `Busy`, auch wenn `Connected By` kurzzeitig noch leer ist.
+- Guest Stabilität:
+	- USB-Host-Caches wurden auf thread-safe Collections umgestellt; der sporadische Fehler `Operations that change non-concurrent collections...` nach Guest-Neustart ist behoben.
+- Konfigurationsmigration/Setup-Hygiene:
+	- Bestehende Konfigurationen werden schema-basiert bereinigt und einmalig neu geschrieben.
+	- Legacy-/ungültige USB-Identity-Keys in `usb.autoShareDeviceKeys` und `usb.deviceMetadata` werden entfernt.
+	- Neuer Standardwert für `usb.autoDetachGracePeriodSeconds` ist `5` Sekunden.
+	- Bei Update-Installationen wird dieser Wert beim nächsten Laden einmalig auf `5` migriert; danach weiterhin frei konfigurierbar.
+
+### Doku
+
+- README auf `v2.5.5` aktualisiert (USB-Defaults und Config-Migration).
+
 ## v2.5.4
 
 ### Highlights
@@ -14,17 +47,10 @@
 - Snapshot-Persistenz:
 	- Checkpoint-Beschreibungs-Overrides werden in der Host-Konfiguration gespeichert und beim Laden korrekt wiederhergestellt.
 	- Das verhindert das bisherige "Beschreibung verschwindet nach Neustart"-Verhalten.
-- Konfigurationsmigration/Setup-Hygiene:
-	- Bestehende Konfigurationen werden beim Laden schema-basiert bereinigt und einmalig neu geschrieben, damit Altlasten aus früheren Installationen nicht als Artefakte bestehen bleiben.
-	- Legacy-/ungültige USB-Identity-Keys in `usb.autoShareDeviceKeys` und `usb.deviceMetadata` werden beim Laden entfernt.
 - Host USB Detach-Policy:
 	- Zyklische Guest-ACK-/Liveness-basierte Auto-Detach-Heuristiken wurden entfernt.
 	- Auto-Detach ist auf explizite Trigger beschränkt (`usb-disconnected` oder VM-ID nicht Running >= 10s).
-	- Explizite `usb-disconnected`-Events aus dem Guest lösen den Host-Detach jetzt immer aus (auch wenn der Auto-Detach-Config-Schalter deaktiviert ist), damit manuelle Guest-Disconnects und Guest-Beenden konsistent wirken.
 	- Bei `usb-disconnected` wartet der Host jetzt nicht nur die Grace-Phase ab, sondern prüft währenddessen aktiv auf frische Reconnect-/Heartbeat-Aktivität und überspringt den Detach, wenn sich der Guest stabil zurückmeldet.
-	- Während dieser Grace-Phase blockiert der Disconnect-Pfad die regulären USB-Refreshes nicht mehr; Host-Listenaktualisierung bei physischem Rein/Raus bleibt dadurch reaktiv.
-	- Geräte, die physisch am Host entfernt wurden (z. B. abgezogen), aber im Status noch als `Attached` ohne `Connected` auftauchen, werden beim Refresh automatisch detacht, damit kein Hängezustand bestehen bleibt.
-	- Multi-VM-Stabilität: `usb-disconnected` für ein Gerät löscht nicht mehr die `Connected By`-Zuordnung eines anderen Geräts mit gleichem Hardware-Profil; Ack-Identity priorisiert dafür `busid` vor `hardware`.
 	- Bei fehlgeschlagenem Auto-Detach bleibt der manuelle Weg (`Detach`/`Unshare`) als kontrollierter Fallback erhalten.
 	- Für diese Trigger nutzt der Host wieder konfigurierbare Retry/Grace/Delay-Werte (`usb.autoDetachRetryAttempts`, `usb.autoDetachGracePeriodSeconds`, `usb.autoDetachRetryDelayMs`).
 - Host USB UX:
@@ -38,11 +64,6 @@
 
 - Snapshot-Beschreibungen gingen nach Reload/Neustart verloren, obwohl der Snapshot selbst vorhanden war.
 - USB-Stale-Recovery reagierte in Grenzfällen zu aggressiv durch zyklische Liveness-Logik; die Detach-Entscheidung folgt jetzt nur noch den klar definierten Triggern.
-- Verzögerte Host-Detachs nach kurzzeitigen USB-Transportabbrüchen konnten trotz schneller Guest-Recovery weiterlaufen; Reconnect-/Heartbeat-Recovery während der Grace-Phase bricht den Auto-Detach jetzt sauber ab.
-- Physisch entfernte Host-USB-Geräte konnten in Einzelfällen als `Attached` hängen bleiben; der Host detacht diesen stale Zustand jetzt automatisch beim USB-Refresh.
-- In Multi-VM-Szenarien konnte `Connected By` auf einem weiterhin attached Gerät verloren gehen, wenn ein anderes Gerät disconnected wurde; die Key-/Cleanup-Logik trennt diese Fälle jetzt korrekt.
-- Guest Share-Liste markiert Geräte mit vorhandenem Host-Attachment-Hinweis nun weiterhin als `Busy` (statt `Available`), auch wenn `Connected By` kurzzeitig noch nicht aufgelöst werden kann.
-- `usbipd`-Detach-Fehler `There is no device with busid ...` wird als No-Op behandelt; dadurch keine unnötigen Warnketten mehr bei bereits verschwundenem BusId.
 - UAC-Anforderung für Host-Detach entfällt; Detach wird ohne zusätzliche Elevation ausgeführt.
 
 ### Doku

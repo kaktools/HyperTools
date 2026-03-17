@@ -22,7 +22,7 @@ public partial class MainViewModel : ViewModelBase
     private const int VkNumLock = 0x90;
     private const uint KeyeventfExtendedKey = 0x0001;
     private const uint KeyeventfKeyUp = 0x0002;
-    private static readonly TimeSpan DefaultStaleUsbAttachGracePeriod = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan DefaultStaleUsbAttachGracePeriod = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan LoopbackManagedUsbAttachGraceFloor = TimeSpan.FromSeconds(180);
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestAckChannelHealthyWindow = TimeSpan.FromMinutes(2);
@@ -1984,7 +1984,7 @@ public partial class MainViewModel : ViewModelBase
 
                 var hasFreshVmId = false;
                 if (device.IsAttached
-                    && UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, _usbAutoDetachGracePeriod, out var sourceVmId))
+                    && UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, GuestAckChannelHealthyWindow, out var sourceVmId))
                 {
                     hasFreshVmId = true;
                     var vmNameById = ResolveVmNameByVmId(sourceVmId);
@@ -1997,7 +1997,7 @@ public partial class MainViewModel : ViewModelBase
                 if (device.IsAttached
                     && !hasFreshVmId
                     && !string.IsNullOrWhiteSpace(device.BusId)
-                    && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, _usbAutoDetachGracePeriod, out var guestComputerName))
+                    && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, GuestAckChannelHealthyWindow, out var guestComputerName))
                 {
                     device.AttachedGuestComputerName = guestComputerName;
                 }
@@ -4485,7 +4485,7 @@ public partial class MainViewModel : ViewModelBase
                              && !string.IsNullOrWhiteSpace(device.BusId))
             .Select(device =>
             {
-                var sourceVmId = UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, _usbAutoDetachGracePeriod, out var vmId)
+                var sourceVmId = UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, GuestAckChannelHealthyWindow, out var vmId)
                     ? vmId
                     : string.Empty;
                 var guestVmName = ResolveVmNameByVmId(sourceVmId);
@@ -5003,22 +5003,6 @@ public partial class MainViewModel : ViewModelBase
             || !HostUsbSharingEnabled)
         {
             return;
-        }
-
-        if (_usbAutoDetachGracePeriod > TimeSpan.Zero)
-        {
-            var recoveredDuringGrace = await WaitForUsbDisconnectRecoveryAsync(
-                normalizedBusId,
-                _usbAutoDetachGracePeriod,
-                _lifetimeCancellation.Token);
-
-            if (recoveredDuringGrace)
-            {
-                Log.Information(
-                    "USB auto-detach skipped after guest disconnect because fresh reconnect activity was detected during grace period. BusId={BusId}",
-                    normalizedBusId);
-                return;
-            }
         }
 
         var gateEntered = false;

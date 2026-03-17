@@ -113,9 +113,9 @@ public sealed partial class App : Application
     ];
 
     private readonly List<UsbIpDeviceInfo> _usbDevices = [];
-    private readonly Dictionary<string, UsbDeviceMetadataEntry> _hostUsbMetadataByKey = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, string> _hostUsbDescriptionsByKey = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, UsbDeviceAttachmentEntry> _hostUsbAttachmentsByBusId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, UsbDeviceMetadataEntry> _hostUsbMetadataByKey = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _hostUsbDescriptionsByKey = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, UsbDeviceAttachmentEntry> _hostUsbAttachmentsByBusId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbAutoConnectBackoffUntilUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbHeartbeatLastSentByBusId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count, DateTimeOffset LastSignalUtc)> _usbAlreadyExportedNotAttachedStateByBusId = new(StringComparer.OrdinalIgnoreCase);
