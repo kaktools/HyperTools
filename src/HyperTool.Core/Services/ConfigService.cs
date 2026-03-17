@@ -7,6 +7,7 @@ namespace HyperTool.Services;
 
 public sealed class ConfigService : IConfigService
 {
+    private const int CurrentConfigSchemaVersion = 2;
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,
@@ -131,6 +132,13 @@ public sealed class ConfigService : IConfigService
     {
         var wasUpdated = false;
         var notices = new List<string>();
+
+        if (config.ConfigSchemaVersion != CurrentConfigSchemaVersion)
+        {
+            config.ConfigSchemaVersion = CurrentConfigSchemaVersion;
+            wasUpdated = true;
+            notices.Add("Konfigurationsschema wurde aktualisiert und veraltete Artefakte wurden bereinigt.");
+        }
 
         if (config.Vms is null)
         {
@@ -282,12 +290,17 @@ public sealed class ConfigService : IConfigService
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            if (normalizedAutoShareKeys.Count != config.Usb.AutoShareDeviceKeys.Count)
+            var sanitizedAutoShareKeys = normalizedAutoShareKeys
+                .Where(IsSupportedUsbDeviceKey)
+                .ToList();
+
+            if (normalizedAutoShareKeys.Count != config.Usb.AutoShareDeviceKeys.Count
+                || sanitizedAutoShareKeys.Count != normalizedAutoShareKeys.Count)
             {
                 wasUpdated = true;
             }
 
-            config.Usb.AutoShareDeviceKeys = normalizedAutoShareKeys;
+            config.Usb.AutoShareDeviceKeys = sanitizedAutoShareKeys;
         }
 
         if (config.Usb.DeviceMetadata is null)
@@ -308,6 +321,7 @@ public sealed class ConfigService : IConfigService
                 .Where(entry => !string.IsNullOrWhiteSpace(entry.DeviceKey)
                                 && (!string.IsNullOrWhiteSpace(entry.CustomName)
                                     || !string.IsNullOrWhiteSpace(entry.Comment)))
+                .Where(entry => IsSupportedUsbDeviceKey(entry.DeviceKey))
                 .GroupBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
                 .Select(group => group.First())
                 .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
@@ -453,6 +467,19 @@ public sealed class ConfigService : IConfigService
 
         var notice = notices.Count == 0 ? null : string.Join(" ", notices);
         return (config, wasUpdated, notice);
+    }
+
+    private static bool IsSupportedUsbDeviceKey(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return false;
+        }
+
+        var normalized = key.Trim();
+        return normalized.StartsWith("hardware:", StringComparison.OrdinalIgnoreCase)
+               || normalized.StartsWith("instance:", StringComparison.OrdinalIgnoreCase)
+               || normalized.StartsWith("guid:", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string NormalizeTheme(string? theme)

@@ -2,6 +2,8 @@ namespace HyperTool.Models;
 
 public sealed class HyperToolConfig
 {
+    public int ConfigSchemaVersion { get; set; } = 2;
+
     public string DefaultVmName { get; set; } = string.Empty;
 
     public string LastSelectedVmName { get; set; } = string.Empty;

@@ -5000,8 +5000,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         if (string.IsNullOrWhiteSpace(normalizedBusId)
-            || !HostUsbSharingEnabled
-            || !UsbAutoDetachOnClientDisconnect)
+            || !HostUsbSharingEnabled)
         {
             return;
         }

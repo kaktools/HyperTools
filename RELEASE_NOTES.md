@@ -14,9 +14,13 @@
 - Snapshot-Persistenz:
 	- Checkpoint-Beschreibungs-Overrides werden in der Host-Konfiguration gespeichert und beim Laden korrekt wiederhergestellt.
 	- Das verhindert das bisherige "Beschreibung verschwindet nach Neustart"-Verhalten.
+- Konfigurationsmigration/Setup-Hygiene:
+	- Bestehende Konfigurationen werden beim Laden schema-basiert bereinigt und einmalig neu geschrieben, damit Altlasten aus früheren Installationen nicht als Artefakte bestehen bleiben.
+	- Legacy-/ungültige USB-Identity-Keys in `usb.autoShareDeviceKeys` und `usb.deviceMetadata` werden beim Laden entfernt.
 - Host USB Detach-Policy:
 	- Zyklische Guest-ACK-/Liveness-basierte Auto-Detach-Heuristiken wurden entfernt.
 	- Auto-Detach ist auf explizite Trigger beschränkt (`usb-disconnected` oder VM-ID nicht Running >= 10s).
+	- Explizite `usb-disconnected`-Events aus dem Guest lösen den Host-Detach jetzt immer aus (auch wenn der Auto-Detach-Config-Schalter deaktiviert ist), damit manuelle Guest-Disconnects und Guest-Beenden konsistent wirken.
 	- Bei `usb-disconnected` wartet der Host jetzt nicht nur die Grace-Phase ab, sondern prüft währenddessen aktiv auf frische Reconnect-/Heartbeat-Aktivität und überspringt den Detach, wenn sich der Guest stabil zurückmeldet.
 	- Während dieser Grace-Phase blockiert der Disconnect-Pfad die regulären USB-Refreshes nicht mehr; Host-Listenaktualisierung bei physischem Rein/Raus bleibt dadurch reaktiv.
 	- Geräte, die physisch am Host entfernt wurden (z. B. abgezogen), aber im Status noch als `Attached` ohne `Connected` auftauchen, werden beim Refresh automatisch detacht, damit kein Hängezustand bestehen bleibt.
