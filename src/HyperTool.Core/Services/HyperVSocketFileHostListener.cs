@@ -9,10 +9,12 @@ namespace HyperTool.Services;
 public sealed class HyperVSocketFileHostListener : IDisposable
 {
     private const int MaxReadChunkBytes = 1024 * 1024;
+    private const int MaxConcurrentClients = 32;
 
     private readonly Guid _serviceId;
     private readonly Func<IReadOnlyList<HostSharedFolderDefinition>> _catalogProvider;
     private readonly Action<DateTimeOffset>? _onRequestServed;
+    private readonly SemaphoreSlim _clientHandlerGate = new(MaxConcurrentClients, MaxConcurrentClients);
     private Socket? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoopTask;
@@ -62,6 +64,7 @@ public sealed class HyperVSocketFileHostListener : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             Socket? socket = null;
+            var gateEntered = false;
             try
             {
                 if (_listener is null)
@@ -69,16 +72,26 @@ public sealed class HyperVSocketFileHostListener : IDisposable
                     break;
                 }
 
+                await _clientHandlerGate.WaitAsync(cancellationToken);
+                gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
                 _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
             }
             catch (OperationCanceledException)
             {
+                if (gateEntered)
+                {
+                    _clientHandlerGate.Release();
+                }
                 break;
             }
             catch
             {
                 socket?.Dispose();
+                if (gateEntered)
+                {
+                    _clientHandlerGate.Release();
+                }
                 if (cancellationToken.IsCancellationRequested)
                 {
                     break;
@@ -89,60 +102,67 @@ public sealed class HyperVSocketFileHostListener : IDisposable
 
     private async Task HandleClientAsync(Socket socket, CancellationToken cancellationToken)
     {
-        await using var stream = new NetworkStream(socket, ownsSocket: true);
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 16 * 1024, leaveOpen: true);
-        await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 16 * 1024, leaveOpen: false) { NewLine = "\n" };
-
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            string? line;
-            try
-            {
-                line = await reader.ReadLineAsync(cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch
-            {
-                break;
-            }
+            await using var stream = new NetworkStream(socket, ownsSocket: true);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 16 * 1024, leaveOpen: true);
+            await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 16 * 1024, leaveOpen: false) { NewLine = "\n" };
 
-            if (line is null)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                break;
-            }
-
-            HostFileServiceResponse response;
-            try
-            {
-                var request = JsonSerializer.Deserialize<HostFileServiceRequest>(line, SerializerOptions);
-                if (request is null)
+                string? line;
+                try
                 {
-                    response = CreateErrorResponse(string.Empty, "bad-request", "Ungültige Anfrage.");
+                    line = await reader.ReadLineAsync(cancellationToken);
                 }
-                else
+                catch (OperationCanceledException)
                 {
-                    response = await ProcessRequestAsync(request, cancellationToken);
+                    break;
+                }
+                catch
+                {
+                    break;
+                }
+
+                if (line is null)
+                {
+                    break;
+                }
+
+                HostFileServiceResponse response;
+                try
+                {
+                    var request = JsonSerializer.Deserialize<HostFileServiceRequest>(line, SerializerOptions);
+                    if (request is null)
+                    {
+                        response = CreateErrorResponse(string.Empty, "bad-request", "Ungültige Anfrage.");
+                    }
+                    else
+                    {
+                        response = await ProcessRequestAsync(request, cancellationToken);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    response = CreateErrorResponse(string.Empty, "server-error", ex.Message);
+                }
+
+                var payload = JsonSerializer.Serialize(response, SerializerOptions);
+                await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
+                await writer.FlushAsync(cancellationToken);
+
+                try
+                {
+                    _onRequestServed?.Invoke(DateTimeOffset.UtcNow);
+                }
+                catch
+                {
                 }
             }
-            catch (Exception ex)
-            {
-                response = CreateErrorResponse(string.Empty, "server-error", ex.Message);
-            }
-
-            var payload = JsonSerializer.Serialize(response, SerializerOptions);
-            await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
-            await writer.FlushAsync(cancellationToken);
-
-            try
-            {
-                _onRequestServed?.Invoke(DateTimeOffset.UtcNow);
-            }
-            catch
-            {
-            }
+        }
+        finally
+        {
+            _clientHandlerGate.Release();
         }
     }
 

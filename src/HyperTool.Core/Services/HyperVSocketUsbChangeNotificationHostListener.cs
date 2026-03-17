@@ -12,6 +12,7 @@ namespace HyperTool.Services;
 /// </summary>
 public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
 {
+    private const int MaxConcurrentSubscribers = 64;
     private static readonly byte[] UsbShareChangedPayload =
         Encoding.UTF8.GetBytes("{\"event\":\"usb-share-changed\"}\n");
 
@@ -23,6 +24,7 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
 
     private readonly Guid _serviceId;
     private readonly ConcurrentDictionary<Guid, SubscriberEntry> _subscribers = new();
+    private readonly SemaphoreSlim _subscriberGate = new(MaxConcurrentSubscribers, MaxConcurrentSubscribers);
     private Socket? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoopTask;
@@ -94,6 +96,7 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             Socket? socket = null;
+            var gateEntered = false;
             try
             {
                 if (_listener is null)
@@ -101,16 +104,26 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
                     break;
                 }
 
+                await _subscriberGate.WaitAsync(cancellationToken);
+                gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
                 _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
             }
             catch (OperationCanceledException)
             {
+                if (gateEntered)
+                {
+                    _subscriberGate.Release();
+                }
                 break;
             }
             catch
             {
                 socket?.Dispose();
+                if (gateEntered)
+                {
+                    _subscriberGate.Release();
+                }
                 if (cancellationToken.IsCancellationRequested)
                 {
                     break;
@@ -148,6 +161,7 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
         {
             _subscribers.TryRemove(entry.Id, out _);
             try { socket.Dispose(); } catch { }
+            _subscriberGate.Release();
         }
     }
 

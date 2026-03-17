@@ -527,6 +527,18 @@ internal sealed class HyperToolRpcFileSystem : FileSystemBase
         var relativePath = NormalizeToRelativePath(FileName);
         var isDirectory = (CreateOptions & FILE_DIRECTORY_FILE) != 0;
 
+        // If Create targets an existing path, report name collision so the caller
+        // can decide whether to prompt/rename/replace.
+        if (TryGetMetadata(relativePath, out var existingMetadata, out var existingStatus))
+        {
+            return STATUS_OBJECT_NAME_COLLISION;
+        }
+
+        if (existingStatus != STATUS_OBJECT_NAME_NOT_FOUND)
+        {
+            return existingStatus;
+        }
+
         var request = new HostFileServiceRequest
         {
             RelativePath = relativePath,
@@ -736,6 +748,42 @@ internal sealed class HyperToolRpcFileSystem : FileSystemBase
             Operation = "set-length",
             RelativePath = node.RelativePath,
             NewSize = checked((long)NewSize)
+        });
+
+        if (!response.Success)
+        {
+            return MapErrorCode(response.ErrorCode);
+        }
+
+        FillFileInfo(response, ref FileInfo);
+        return STATUS_SUCCESS;
+    }
+
+    public override int Overwrite(
+        object FileNode,
+        object FileDesc,
+        uint FileAttributes,
+        bool ReplaceFileAttributes,
+        ulong AllocationSize,
+        out FspFileInfo FileInfo)
+    {
+        FileInfo = new FspFileInfo();
+
+        if (!TryGetNode(FileNode, out var node))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (node.IsDirectory)
+        {
+            return STATUS_FILE_IS_A_DIRECTORY;
+        }
+
+        var response = SendRequest(new HostFileServiceRequest
+        {
+            Operation = "set-length",
+            RelativePath = node.RelativePath,
+            NewSize = checked((long)Math.Min(AllocationSize, long.MaxValue))
         });
 
         if (!response.Success)

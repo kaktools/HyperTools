@@ -13,6 +13,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Media;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Reflection;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
@@ -265,11 +266,11 @@ internal sealed class GuestMainWindow : Window
     private bool _suppressThemeEvents;
     private bool _isThemeRestartInProgress;
     private bool _isThemeToggleHandlerAttached;
-    private bool _isUsbTransportToggleHandlerAttached;
-    private bool _isUsbModeBadgeHandlersAttached;
     private bool _suppressUsbTransportToggleEvents;
     private bool _suppressUsbAutoConnectToggleEvents;
     private bool _suppressUsbDisconnectOnExitToggleEvents;
+    private bool _isApplyingConfigToControls;
+    private bool _isUiInitialized;
     private bool _isHandlingMenuSwitch;
     private bool _isMenuSwitchPromptOpen;
     private bool _usbResetMigrationInfoShown;
@@ -328,6 +329,8 @@ internal sealed class GuestMainWindow : Window
 
         GuestLogger.EntryWritten += OnLoggerEntryWritten;
         Closed += (_, _) => GuestLogger.EntryWritten -= OnLoggerEntryWritten;
+
+        _isUiInitialized = true;
 
         DispatcherQueue.TryEnqueue(() => _ = ShowUsbResetMigrationInfoIfPendingAsync());
     }
@@ -837,7 +840,7 @@ internal sealed class GuestMainWindow : Window
     {
         _diagHyperVSocketText.Text = hyperVSocketActive ? "Ja" : "Nein";
         _diagRegistryServiceText.Text = registryServicePresent ? "Ja" : "Nein";
-        _diagFallbackText.Text = fallbackActive ? "Ja" : "Nein";
+        _diagFallbackText.Text = "Nein";
         UpdateUsbTransportHeaderStatus();
     }
 
@@ -2272,47 +2275,54 @@ internal sealed class GuestMainWindow : Window
 
     private async void OnUsbFeatureToggleChanged(object sender, RoutedEventArgs e)
     {
-        if (_suppressUsbFeatureToggle)
+        try
         {
-            return;
-        }
-
-        if (!_isUsbClientAvailable)
-        {
-            _suppressUsbFeatureToggle = true;
-            try
+            if (_suppressUsbFeatureToggle || _isApplyingConfigToControls || !_isUiInitialized)
             {
-                _usbFeatureEnabledToggleSwitch.IsOn = false;
-            }
-            finally
-            {
-                _suppressUsbFeatureToggle = false;
+                return;
             }
 
+            if (!_isUsbClientAvailable)
+            {
+                _suppressUsbFeatureToggle = true;
+                try
+                {
+                    _usbFeatureEnabledToggleSwitch.IsOn = false;
+                }
+                finally
+                {
+                    _suppressUsbFeatureToggle = false;
+                }
+
+                _config.Usb ??= new GuestUsbSettings();
+                _config.Usb.Enabled = false;
+                await SaveConfigQuietlyAsync();
+                UpdateUsbRuntimeStatusUi();
+                AppendNotification("[Warn] USB-Share bleibt deaktiviert, bis usbip-win2 installiert ist.");
+                return;
+            }
+
+            var enabled = _usbFeatureEnabledToggleSwitch.IsOn;
             _config.Usb ??= new GuestUsbSettings();
-            _config.Usb.Enabled = false;
-            await SaveConfigQuietlyAsync();
+            _config.Usb.Enabled = enabled;
             UpdateUsbRuntimeStatusUi();
-            AppendNotification("[Warn] USB-Share bleibt deaktiviert, bis usbip-win2 installiert ist.");
-            return;
+
+            await _saveConfigAsync(_config);
+
+            if (!enabled)
+            {
+                UpdateUsbDevices(Array.Empty<UsbIpDeviceInfo>());
+                AppendNotification("[Info] USB Funktion lokal deaktiviert.");
+                return;
+            }
+
+            AppendNotification("[Info] USB Funktion lokal aktiviert. Aktualisiere Geräteansicht …");
+            await RefreshUsbAsync();
         }
-
-        var enabled = _usbFeatureEnabledToggleSwitch.IsOn;
-        _config.Usb ??= new GuestUsbSettings();
-        _config.Usb.Enabled = enabled;
-        UpdateUsbRuntimeStatusUi();
-
-        await _saveConfigAsync(_config);
-
-        if (!enabled)
+        catch (Exception ex)
         {
-            UpdateUsbDevices(Array.Empty<UsbIpDeviceInfo>());
-            AppendNotification("[Info] USB Funktion lokal deaktiviert.");
-            return;
+            AppendNotification($"[Warn] USB-Funktionsumschaltung fehlgeschlagen: {ex.Message}");
         }
-
-        AppendNotification("[Info] USB Funktion lokal aktiviert. Aktualisiere Geräteansicht …");
-        await RefreshUsbAsync();
     }
 
     private void OnSharedFolderBaseDriveSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -2645,6 +2655,7 @@ internal sealed class GuestMainWindow : Window
             }
             catch (Exception ex)
             {
+                var socketException = ex as SocketException ?? ex.InnerException as SocketException;
                 await RefreshSharedFolderMountStatesSafeAsync();
                 _sharedFolderLastError = ex.Message;
                 _sharedFolderStatusText.Text = $"{prefix}: Fehler beim Katalog-Mount ({baseDriveLetter}:). {ex.Message}";
@@ -2652,7 +2663,11 @@ internal sealed class GuestMainWindow : Window
                 {
                     driveLetter = baseDriveLetter,
                     count = enabledMappings.Count,
-                    exceptionType = ex.GetType().FullName
+                    exceptionType = ex.GetType().FullName,
+                    socketErrorCode = socketException?.SocketErrorCode.ToString(),
+                    nativeErrorCode = socketException?.NativeErrorCode,
+                    hResult = socketException?.HResult,
+                    socketGate = HyperVSocketClientConcurrencyGate.GetSnapshot()
                 });
             }
         }
@@ -2677,17 +2692,10 @@ internal sealed class GuestMainWindow : Window
     private void UpdateHostDiscoveryPresentation()
     {
         var hostName = (_config.Usb?.HostName ?? string.Empty).Trim();
-        var hostAddress = (_config.Usb?.HostAddress ?? string.Empty).Trim();
 
         if (!string.IsNullOrWhiteSpace(hostName))
         {
             _usbResolvedHostNameText.Text = $"Ermittelter Hostname: {hostName}";
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(hostAddress))
-        {
-            _usbResolvedHostNameText.Text = $"Kein Hostname gefunden · Fallback-Ziel: {hostAddress}";
             return;
         }
 
@@ -3156,7 +3164,6 @@ internal sealed class GuestMainWindow : Window
         var usbStack = new StackPanel { Spacing = 8 };
 
         _usbHyperVModeIconBadge.Child = _usbHyperVModeIcon;
-        _usbIpModeIconBadge.Child = _usbIpModeIcon;
 
         var hyperVModeBadgeContent = new StackPanel
         {
@@ -3168,37 +3175,6 @@ internal sealed class GuestMainWindow : Window
         hyperVModeBadgeContent.Children.Add(_usbHyperVModeBadgeText);
         _usbHyperVModeBadge.Child = hyperVModeBadgeContent;
 
-        var ipModeBadgeContent = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 6,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        ipModeBadgeContent.Children.Add(_usbIpModeIconBadge);
-        ipModeBadgeContent.Children.Add(_usbIpModeBadgeText);
-        _usbIpModeBadge.Child = ipModeBadgeContent;
-
-        if (!_isUsbModeBadgeHandlersAttached)
-        {
-            _usbHyperVModeBadge.Tapped += (_, _) =>
-            {
-                if (_useHyperVSocketCheckBox.IsChecked != true)
-                {
-                    _useHyperVSocketCheckBox.IsChecked = true;
-                }
-            };
-
-            _usbIpModeBadge.Tapped += (_, _) =>
-            {
-                if (_useHyperVSocketCheckBox.IsChecked != false)
-                {
-                    _useHyperVSocketCheckBox.IsChecked = false;
-                }
-            };
-
-            _isUsbModeBadgeHandlersAttached = true;
-        }
-
         var modeBadgeRow = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -3207,7 +3183,6 @@ internal sealed class GuestMainWindow : Window
             VerticalAlignment = VerticalAlignment.Top
         };
         modeBadgeRow.Children.Add(_usbHyperVModeBadge);
-        modeBadgeRow.Children.Add(_usbIpModeBadge);
 
         var usbHeaderGrid = new Grid { ColumnSpacing = 10 };
         usbHeaderGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -3222,7 +3197,7 @@ internal sealed class GuestMainWindow : Window
         };
         usbHeaderTitleRow.Children.Add(new TextBlock
         {
-            Text = "USB Host-Verbindung",
+            Text = "Host-Verbindung",
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             FontSize = 16,
             VerticalAlignment = VerticalAlignment.Center,
@@ -3235,48 +3210,22 @@ internal sealed class GuestMainWindow : Window
         usbHeaderGrid.Children.Add(modeBadgeRow);
         usbStack.Children.Add(usbHeaderGrid);
 
-        _useHyperVSocketCheckBox.Margin = new Thickness(0, 2, 0, 0);
-        if (!_isUsbTransportToggleHandlerAttached)
-        {
-            _useHyperVSocketCheckBox.Checked += async (_, _) => await OnUsbTransportModeToggledAsync();
-            _useHyperVSocketCheckBox.Unchecked += async (_, _) => await OnUsbTransportModeToggledAsync();
-            _isUsbTransportToggleHandlerAttached = true;
-        }
-        usbStack.Children.Add(_useHyperVSocketCheckBox);
-
         _usbModeHintText.Foreground = Application.Current.Resources["TextMutedBrush"] as Brush;
         usbStack.Children.Add(_usbModeHintText);
 
-        _usbHostAddressEditorCard.BorderThickness = new Thickness(0);
-        _usbHostAddressEditorCard.BorderBrush = new SolidColorBrush(Color.FromArgb(0x00, 0x00, 0x00, 0x00));
-        _usbHostAddressEditorCard.Background = new SolidColorBrush(Color.FromArgb(0x00, 0x00, 0x00, 0x00));
-        _usbHostAddressEditorCard.Padding = new Thickness(0);
-
-        _usbHostAddressTextBox.PlaceholderText = "Beispiel: HOSTNAME oder 172.25.80.1";
-        _usbHostAddressTextBox.MinWidth = 420;
-        _usbHostAddressTextBox.MaxWidth = 620;
-        _usbHostAddressTextBox.HorizontalAlignment = HorizontalAlignment.Left;
-        _usbHostAddressTextBox.CornerRadius = new CornerRadius(8);
-        _usbHostAddressTextBox.TextChanged += (_, _) => UpdateUsbTransportModePresentation();
-
-        var usbHostAddressRow = new Grid { ColumnSpacing = 8 };
-        usbHostAddressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        usbHostAddressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        usbHostAddressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        usbHostAddressRow.Children.Add(_usbHostAddressTextBox);
-
-        _usbHostSearchButton = CreateIconButton("🔎", "Host suchen", onClick: async (_, _) => await SearchUsbHostAddressAsync());
+        var usbHostDiscoveryRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _usbHostSearchButton = CreateIconButton("🔎", "Hostname aktualisieren", onClick: async (_, _) => await SearchUsbHostAddressAsync());
         _usbHostSearchButton.HorizontalAlignment = HorizontalAlignment.Left;
         _usbHostSearchButton.VerticalAlignment = VerticalAlignment.Center;
-        Grid.SetColumn(_usbHostSearchButton, 1);
-        usbHostAddressRow.Children.Add(_usbHostSearchButton);
-
+        usbHostDiscoveryRow.Children.Add(_usbHostSearchButton);
         SetUsbHostSearchStatus("Bereit", UsbHostSearchStatusKind.Neutral);
-        Grid.SetColumn(_usbHostSearchStatusText, 2);
-        usbHostAddressRow.Children.Add(_usbHostSearchStatusText);
-
-        _usbHostAddressEditorCard.Child = usbHostAddressRow;
-        usbStack.Children.Add(_usbHostAddressEditorCard);
+        usbHostDiscoveryRow.Children.Add(_usbHostSearchStatusText);
+        usbStack.Children.Add(usbHostDiscoveryRow);
         usbStack.Children.Add(_usbResolvedHostNameText);
 
         UpdateUsbTransportModePresentation();
@@ -3435,11 +3384,6 @@ internal sealed class GuestMainWindow : Window
         registryRow.Children.Add(_diagRegistryServiceText);
         diagnosticsStack.Children.Add(registryRow);
 
-        var fallbackRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
-        fallbackRow.Children.Add(new TextBlock { Text = "Fallback auf IP aktiv:", Opacity = 0.9, VerticalAlignment = VerticalAlignment.Center });
-        fallbackRow.Children.Add(_diagFallbackText);
-        diagnosticsStack.Children.Add(fallbackRow);
-
         var diagnosticsLayout = new Grid();
         diagnosticsLayout.Children.Add(diagnosticsStack);
 
@@ -3582,15 +3526,12 @@ internal sealed class GuestMainWindow : Window
         }
 
         if ((_usbFeatureEnabledToggleSwitch.IsOn) != (_config.Usb?.Enabled != false)
-            || (_usbDisconnectOnExitCheckBox.IsChecked != false) != (_config.Usb?.DisconnectOnExit != false)
-            || (_useHyperVSocketCheckBox.IsChecked != false) != (_config.Usb?.UseHyperVSocket != false))
+            || (_usbDisconnectOnExitCheckBox.IsChecked != false) != (_config.Usb?.DisconnectOnExit != false))
         {
             return true;
         }
 
-        var configuredHost = (_config.Usb?.HostAddress ?? string.Empty).Trim();
-        var editorHost = (_usbHostAddressTextBox.Text ?? string.Empty).Trim();
-        return !string.Equals(editorHost, configuredHost, StringComparison.OrdinalIgnoreCase);
+        return false;
     }
 
     private async Task<ContentDialogResult> ShowUnsavedSettingsPromptAsync()
@@ -3685,6 +3626,9 @@ internal sealed class GuestMainWindow : Window
 
     private void ApplyConfigToControls()
     {
+        _isApplyingConfigToControls = true;
+        try
+        {
         var isDark = string.Equals(GuestConfigService.NormalizeTheme(_config.Ui.Theme), "dark", StringComparison.OrdinalIgnoreCase);
 
         _suppressThemeEvents = true;
@@ -3694,7 +3638,6 @@ internal sealed class GuestMainWindow : Window
 
         _themeText.Text = isDark ? "Dunkles Theme" : "Helles Theme";
 
-        _usbHostAddressTextBox.Text = (_config.Usb?.HostAddress ?? string.Empty).Trim();
         _startWithWindowsCheckBox.IsChecked = _config.Ui.StartWithWindows;
         _startMinimizedCheckBox.IsChecked = _config.Ui.StartMinimized;
         _minimizeToTrayCheckBox.IsChecked = _config.Ui.MinimizeToTray;
@@ -3703,16 +3646,6 @@ internal sealed class GuestMainWindow : Window
 
         _config.FileService ??= new GuestFileServiceSettings();
         _config.FileService.MappingMode = GuestConfigService.NormalizeMappingMode(_config.FileService.MappingMode);
-
-        _suppressUsbTransportToggleEvents = true;
-        try
-        {
-            _useHyperVSocketCheckBox.IsChecked = _config.Usb?.UseHyperVSocket != false;
-        }
-        finally
-        {
-            _suppressUsbTransportToggleEvents = false;
-        }
 
         _suppressUsbFeatureToggle = true;
         try
@@ -3746,6 +3679,11 @@ internal sealed class GuestMainWindow : Window
             _sharedFolderMappingsListView.ItemsSource = null;
             _sharedFolderMappingsListView.ItemsSource = _sharedFolderMappings;
             _ = RefreshSharedFolderMountStatesSafeAsync();
+        }
+        }
+        finally
+        {
+            _isApplyingConfigToControls = false;
         }
     }
 
@@ -3811,8 +3749,7 @@ internal sealed class GuestMainWindow : Window
         _config.Usb ??= new GuestUsbSettings();
         _config.Usb.Enabled = _usbFeatureEnabledToggleSwitch.IsOn;
         _config.Usb.DisconnectOnExit = _usbDisconnectOnExitCheckBox.IsChecked != false;
-        _config.Usb.UseHyperVSocket = _useHyperVSocketCheckBox.IsChecked != false;
-        _config.Usb.HostAddress = (_usbHostAddressTextBox.Text ?? string.Empty).Trim();
+        _config.Usb.UseHyperVSocket = true;
 
         _config.FileService ??= new GuestFileServiceSettings();
         _config.FileService.Enabled = true;
@@ -3828,22 +3765,50 @@ internal sealed class GuestMainWindow : Window
 
     private async Task OnUsbTransportModeToggledAsync()
     {
-        if (_suppressUsbTransportToggleEvents)
+        try
         {
-            return;
+            if (_suppressUsbTransportToggleEvents || _isApplyingConfigToControls || !_isUiInitialized)
+            {
+                return;
+            }
+
+            _config.Usb ??= new GuestUsbSettings();
+            var previousMode = _config.Usb.UseHyperVSocket;
+            _config.Usb.UseHyperVSocket = _useHyperVSocketCheckBox.IsChecked != false;
+
+            UpdateUsbTransportModePresentation();
+
+            try
+            {
+                await _saveConfigAsync(_config);
+                AppendNotification(_config.Usb.UseHyperVSocket
+                    ? "[Info] USB Transportmodus: Hyper-V Socket bevorzugt."
+                    : "[Info] USB Transportmodus: IP-Mode aktiv.");
+
+                ScheduleUsbTransportAutoRefresh();
+            }
+            catch (Exception ex)
+            {
+                _config.Usb.UseHyperVSocket = previousMode;
+
+                _suppressUsbTransportToggleEvents = true;
+                try
+                {
+                    _useHyperVSocketCheckBox.IsChecked = previousMode;
+                }
+                finally
+                {
+                    _suppressUsbTransportToggleEvents = false;
+                }
+
+                UpdateUsbTransportModePresentation();
+                AppendNotification($"[Warn] USB-Transportmodus konnte nicht gespeichert werden: {ex.Message}");
+            }
         }
-
-        _config.Usb ??= new GuestUsbSettings();
-        _config.Usb.UseHyperVSocket = _useHyperVSocketCheckBox.IsChecked != false;
-
-        UpdateUsbTransportModePresentation();
-
-        await _saveConfigAsync(_config);
-        AppendNotification(_config.Usb.UseHyperVSocket
-            ? "[Info] USB Transportmodus: Hyper-V Socket bevorzugt."
-            : "[Info] USB Transportmodus: IP-Mode aktiv.");
-
-        ScheduleUsbTransportAutoRefresh();
+        catch (Exception ex)
+        {
+            AppendNotification($"[Warn] USB-Transportumschaltung unerwartet fehlgeschlagen: {ex.Message}");
+        }
     }
 
     private void CancelPendingUsbTransportAutoRefresh()
@@ -3885,8 +3850,7 @@ internal sealed class GuestMainWindow : Window
                 return;
             }
 
-            var modeLabel = _config.Usb?.UseHyperVSocket == true ? "Hyper-V Socket" : "IP-Mode";
-            AppendNotification($"[Info] Auto-Refresh nach Transportwechsel ({modeLabel}) …");
+            AppendNotification("[Info] Auto-Refresh der Hyper-V USB-Verbindung …");
             await RefreshUsbAsync();
         }
         catch (TaskCanceledException)
@@ -3908,91 +3872,48 @@ internal sealed class GuestMainWindow : Window
 
     private void UpdateUsbTransportModePresentation()
     {
-        var useHyperVSocket = _useHyperVSocketCheckBox.IsChecked != false;
-        var hyperVSocketLive = string.Equals(_diagHyperVSocketText.Text, "Ja", StringComparison.OrdinalIgnoreCase)
-                              && string.Equals(_diagRegistryServiceText.Text, "Ja", StringComparison.OrdinalIgnoreCase)
-                              && !string.Equals(_diagFallbackText.Text, "Ja", StringComparison.OrdinalIgnoreCase);
-        var ipModeActive = !useHyperVSocket || !hyperVSocketLive;
-
-        _usbHostAddressEditorCard.Visibility = ipModeActive ? Visibility.Visible : Visibility.Collapsed;
-        _usbHostAddressTextBox.IsEnabled = ipModeActive;
+        _usbModeHintText.Text = "HyperTool nutzt ausschließlich Hyper-V Socket. Hostname wird über den Hyper-V Kanal ermittelt.";
         if (_usbHostSearchButton is not null)
         {
-            _usbHostSearchButton.IsEnabled = ipModeActive;
+            _usbHostSearchButton.IsEnabled = true;
         }
-        _usbHostSearchStatusText.Visibility = ipModeActive ? Visibility.Visible : Visibility.Collapsed;
-
-        if (useHyperVSocket)
-        {
-            _usbModeHintText.Text = ipModeActive
-                ? "Hyper-V Socket ist aktiviert, aktuell aber nicht aktiv. IP-Mode/Fallback nutzt die Host-Adresse unten."
-                : "Hyper-V Socket ist aktiviert. Bei Verfügbarkeitsproblemen wird auf IP zurückgefallen.";
-        }
-        else
-        {
-            _usbModeHintText.Text = "IP-Mode ist aktiviert. Die Host-Adresse unten wird für USB Connect verwendet.";
-        }
+        _usbHostSearchStatusText.Visibility = Visibility.Visible;
 
         UpdateUsbTransportHeaderStatus();
     }
 
     private void UpdateUsbTransportHeaderStatus()
     {
-        var useHyperVSocket = _config.Usb?.UseHyperVSocket != false;
         var hyperVSocketReportedActive = string.Equals(_diagHyperVSocketText.Text, "Ja", StringComparison.OrdinalIgnoreCase);
         var registryServicePresent = string.Equals(_diagRegistryServiceText.Text, "Ja", StringComparison.OrdinalIgnoreCase);
-        var fallbackActive = string.Equals(_diagFallbackText.Text, "Ja", StringComparison.OrdinalIgnoreCase);
-        var hyperVSocketLive = hyperVSocketReportedActive && registryServicePresent && !fallbackActive;
-
-        if (useHyperVSocket)
-        {
-            _usbTransportModeBadgeText.Text = _isCompactHeaderLayout
-                ? (hyperVSocketLive
-                    ? "Hyper-V aktiv"
-                    : (fallbackActive ? "IP-Fallback" : "Hyper-V bevorzugt"))
-                : (hyperVSocketLive
-                    ? "Hyper-Socket aktiv"
-                    : (fallbackActive ? "IP-Fallback aktiv" : "Hyper-Socket bevorzugt"));
-            var palette = fallbackActive
-                ? ResolveUsbModePalette(forHyperV: false, isActive: true)
-                : ResolveUsbModePalette(forHyperV: true, isActive: hyperVSocketLive);
-            _usbTransportModeBadge.Background = palette.chipBackground;
-            _usbTransportModeBadge.BorderBrush = palette.chipBorder;
-            _usbTransportModeBadgeText.Foreground = palette.textForeground;
-            UpdateUsbTransportModeBadges(useHyperVSocket: true, hyperVSocketLive: hyperVSocketLive, fallbackActive: fallbackActive);
-            return;
-        }
-
-        var configuredHost = (_usbHostAddressTextBox.Text ?? _config.Usb?.HostAddress ?? string.Empty).Trim();
-        var ipDisplay = string.IsNullOrWhiteSpace(configuredHost) ? "auto" : configuredHost;
+        var hyperVSocketNo = string.Equals(_diagHyperVSocketText.Text, "Nein", StringComparison.OrdinalIgnoreCase);
+        var registryNo = string.Equals(_diagRegistryServiceText.Text, "Nein", StringComparison.OrdinalIgnoreCase);
+        var hasError = hyperVSocketNo || registryNo;
+        var hyperVSocketLive = hyperVSocketReportedActive && registryServicePresent;
 
         _usbTransportModeBadgeText.Text = _isCompactHeaderLayout
-            ? "IP-Mode"
-            : $"IP-Mode: {ipDisplay}";
-        var ipPalette = ResolveUsbModePalette(forHyperV: false, isActive: true);
-        _usbTransportModeBadge.Background = ipPalette.chipBackground;
-        _usbTransportModeBadge.BorderBrush = ipPalette.chipBorder;
-        _usbTransportModeBadgeText.Foreground = ipPalette.textForeground;
-        UpdateUsbTransportModeBadges(useHyperVSocket: false, hyperVSocketLive: false, fallbackActive: true);
+            ? (hyperVSocketLive ? "Hyper-V aktiv" : (hasError ? "Hyper-V Fehler" : "Hyper-V inaktiv"))
+            : (hyperVSocketLive ? "Hyper-V Socket aktiv" : (hasError ? "Hyper-V Socket Fehler" : "Hyper-V Socket inaktiv"));
+        var palette = hasError
+            ? ResolveUsbModePalette(forHyperV: false, isActive: true)
+            : ResolveUsbModePalette(forHyperV: true, isActive: hyperVSocketLive);
+        _usbTransportModeBadge.Background = palette.chipBackground;
+        _usbTransportModeBadge.BorderBrush = palette.chipBorder;
+        _usbTransportModeBadgeText.Foreground = palette.textForeground;
+        UpdateUsbTransportModeBadges(hyperVSocketLive, hasError);
     }
 
-    private void UpdateUsbTransportModeBadges(bool useHyperVSocket, bool hyperVSocketLive, bool fallbackActive)
+    private void UpdateUsbTransportModeBadges(bool hyperVSocketLive, bool hasError)
     {
-        var hyperVPalette = ResolveUsbModePalette(forHyperV: true, isActive: useHyperVSocket && hyperVSocketLive);
+        var hyperVPalette = hasError
+            ? ResolveUsbModePalette(forHyperV: false, isActive: true)
+            : ResolveUsbModePalette(forHyperV: true, isActive: hyperVSocketLive);
         _usbHyperVModeBadge.Background = hyperVPalette.chipBackground;
         _usbHyperVModeBadge.BorderBrush = hyperVPalette.chipBorder;
         _usbHyperVModeIconBadge.Background = hyperVPalette.iconBackground;
         _usbHyperVModeIconBadge.BorderBrush = hyperVPalette.iconBorder;
         _usbHyperVModeIcon.Foreground = hyperVPalette.iconForeground;
         _usbHyperVModeBadgeText.Foreground = hyperVPalette.textForeground;
-
-        var ipPalette = ResolveUsbModePalette(forHyperV: false, isActive: !useHyperVSocket || fallbackActive);
-        _usbIpModeBadge.Background = ipPalette.chipBackground;
-        _usbIpModeBadge.BorderBrush = ipPalette.chipBorder;
-        _usbIpModeIconBadge.Background = ipPalette.iconBackground;
-        _usbIpModeIconBadge.BorderBrush = ipPalette.iconBorder;
-        _usbIpModeIcon.Foreground = ipPalette.iconForeground;
-        _usbIpModeBadgeText.Foreground = ipPalette.textForeground;
     }
 
     private (Brush chipBackground, Brush chipBorder, Brush iconBackground, Brush iconBorder, Brush iconForeground, Brush textForeground) ResolveUsbModePalette(bool forHyperV, bool isActive)
@@ -4037,21 +3958,21 @@ internal sealed class GuestMainWindow : Window
         if (isDarkMode)
         {
             return (
-                Brush(0xFF, 0x47, 0x31, 0x1B),
-                Brush(0xFF, 0xF2, 0x9A, 0x3A),
-                Brush(0xFF, 0xF2, 0x9A, 0x3A),
-                Brush(0xFF, 0xF2, 0x9A, 0x3A),
-                Brush(0xFF, 0x2A, 0x1A, 0x08),
-                Brush(0xFF, 0xFF, 0xE9, 0xCC));
+                Brush(0xFF, 0x4A, 0x1D, 0x24),
+                Brush(0xFF, 0xDD, 0x56, 0x6A),
+                Brush(0xFF, 0xDD, 0x56, 0x6A),
+                Brush(0xFF, 0xDD, 0x56, 0x6A),
+                Brush(0xFF, 0x33, 0x10, 0x16),
+                Brush(0xFF, 0xFF, 0xE2, 0xE7));
         }
 
         return (
-            Brush(0xFF, 0xFF, 0xF1, 0xDF),
-            Brush(0xFF, 0xD7, 0x82, 0x2C),
-            Brush(0xFF, 0xD7, 0x82, 0x2C),
-            Brush(0xFF, 0xD7, 0x82, 0x2C),
-            Brush(0xFF, 0xFF, 0xFA, 0xF3),
-            Brush(0xFF, 0x6B, 0x3A, 0x0A));
+            Brush(0xFF, 0xFE, 0xEA, 0xED),
+            Brush(0xFF, 0xD0, 0x45, 0x5A),
+            Brush(0xFF, 0xD0, 0x45, 0x5A),
+            Brush(0xFF, 0xD0, 0x45, 0x5A),
+            Brush(0xFF, 0xFF, 0xF8, 0xF9),
+            Brush(0xFF, 0x7A, 0x1D, 0x2B));
     }
 
     private (Brush chipBackground, Brush chipBorder, Brush textForeground) ResolveHostFeatureChipPalette(bool isActive)
@@ -4171,22 +4092,29 @@ internal sealed class GuestMainWindow : Window
 
     private async Task SetUsbDisconnectOnExitAsync(bool enabled)
     {
-        if (_suppressUsbDisconnectOnExitToggleEvents)
+        try
         {
-            return;
-        }
+            if (_suppressUsbDisconnectOnExitToggleEvents || _isApplyingConfigToControls || !_isUiInitialized)
+            {
+                return;
+            }
 
-        _config.Usb ??= new GuestUsbSettings();
-        if (_config.Usb.DisconnectOnExit == enabled)
+            _config.Usb ??= new GuestUsbSettings();
+            if (_config.Usb.DisconnectOnExit == enabled)
+            {
+                return;
+            }
+
+            _config.Usb.DisconnectOnExit = enabled;
+            await _saveConfigAsync(_config);
+            AppendNotification(enabled
+                ? "[Info] USB-Disconnect beim Beenden aktiviert."
+                : "[Info] USB-Disconnect beim Beenden deaktiviert.");
+        }
+        catch (Exception ex)
         {
-            return;
+            AppendNotification($"[Warn] USB-Disconnect-Einstellung konnte nicht gespeichert werden: {ex.Message}");
         }
-
-        _config.Usb.DisconnectOnExit = enabled;
-        await _saveConfigAsync(_config);
-        AppendNotification(enabled
-            ? "[Info] USB-Disconnect beim Beenden aktiviert."
-            : "[Info] USB-Disconnect beim Beenden deaktiviert.");
     }
 
     private void UpdateAutoConnectToggleFromSelection()
@@ -4222,82 +4150,89 @@ internal sealed class GuestMainWindow : Window
 
     private async Task SetSelectedUsbDeviceAutoConnectAsync(bool enabled)
     {
-        if (_suppressUsbAutoConnectToggleEvents)
+        try
         {
-            return;
-        }
-
-        var selected = GetSelectedUsbDevice();
-        if (selected is null)
-        {
-            return;
-        }
-
-        var key = BuildAutoConnectKey(selected);
-        if (string.IsNullOrWhiteSpace(key))
-        {
-            AppendNotification("[Warn] Auto-Connect konnte für dieses Gerät nicht gespeichert werden.");
-            UpdateAutoConnectToggleFromSelection();
-            return;
-        }
-
-        _config.Usb ??= new GuestUsbSettings();
-        var keys = _config.Usb.AutoConnectDeviceKeys ?? [];
-        var changed = false;
-        var baseKey = BuildAutoConnectBaseKey(selected);
-        var specificKey = BuildAutoConnectSpecificKey(selected);
-        if (!string.IsNullOrWhiteSpace(specificKey))
-        {
-            key = specificKey;
-        }
-        var legacyMetaPrefix = string.IsNullOrWhiteSpace(baseKey) ? string.Empty : baseKey + "|meta:";
-        var usesSpecificKey = !string.IsNullOrWhiteSpace(specificKey)
-            && string.Equals(key, specificKey, StringComparison.OrdinalIgnoreCase);
-
-        if (enabled)
-        {
-            if (!keys.Contains(key, StringComparer.OrdinalIgnoreCase))
+            if (_suppressUsbAutoConnectToggleEvents || _isApplyingConfigToControls || !_isUiInitialized)
             {
-                keys.Add(key);
-                changed = true;
+                return;
             }
 
-            if (usesSpecificKey && !string.IsNullOrWhiteSpace(baseKey))
+            var selected = GetSelectedUsbDevice();
+            if (selected is null)
+            {
+                return;
+            }
+
+            var key = BuildAutoConnectKey(selected);
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                AppendNotification("[Warn] Auto-Connect konnte für dieses Gerät nicht gespeichert werden.");
+                UpdateAutoConnectToggleFromSelection();
+                return;
+            }
+
+            _config.Usb ??= new GuestUsbSettings();
+            var keys = _config.Usb.AutoConnectDeviceKeys ?? [];
+            var changed = false;
+            var baseKey = BuildAutoConnectBaseKey(selected);
+            var specificKey = BuildAutoConnectSpecificKey(selected);
+            if (!string.IsNullOrWhiteSpace(specificKey))
+            {
+                key = specificKey;
+            }
+            var legacyMetaPrefix = string.IsNullOrWhiteSpace(baseKey) ? string.Empty : baseKey + "|meta:";
+            var usesSpecificKey = !string.IsNullOrWhiteSpace(specificKey)
+                && string.Equals(key, specificKey, StringComparison.OrdinalIgnoreCase);
+
+            if (enabled)
+            {
+                if (!keys.Contains(key, StringComparer.OrdinalIgnoreCase))
+                {
+                    keys.Add(key);
+                    changed = true;
+                }
+
+                if (usesSpecificKey && !string.IsNullOrWhiteSpace(baseKey))
+                {
+                    changed = keys.RemoveAll(existing =>
+                        string.Equals(existing, baseKey, StringComparison.OrdinalIgnoreCase)) > 0 || changed;
+                }
+
+                if (!string.IsNullOrWhiteSpace(legacyMetaPrefix))
+                {
+                    changed = keys.RemoveAll(existing =>
+                        !string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)
+                        && existing.StartsWith(legacyMetaPrefix, StringComparison.OrdinalIgnoreCase)) > 0 || changed;
+                }
+            }
+            else
             {
                 changed = keys.RemoveAll(existing =>
-                    string.Equals(existing, baseKey, StringComparison.OrdinalIgnoreCase)) > 0 || changed;
+                        string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)
+                        || (!string.IsNullOrWhiteSpace(baseKey)
+                            && IsAutoConnectKeyMatch(existing, baseKey))) > 0;
             }
 
-            if (!string.IsNullOrWhiteSpace(legacyMetaPrefix))
+            if (!changed)
             {
-                changed = keys.RemoveAll(existing =>
-                    !string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)
-                    && existing.StartsWith(legacyMetaPrefix, StringComparison.OrdinalIgnoreCase)) > 0 || changed;
+                return;
             }
+
+            _config.Usb.AutoConnectDeviceKeys = keys
+                .Where(static entry => !string.IsNullOrWhiteSpace(entry))
+                .Select(static entry => entry.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            await _saveConfigAsync(_config);
+            AppendNotification(enabled
+                ? $"[Info] Auto-Connect aktiviert für: {selected.Description}"
+                : $"[Info] Auto-Connect deaktiviert für: {selected.Description}");
         }
-        else
+        catch (Exception ex)
         {
-            changed = keys.RemoveAll(existing =>
-                    string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)
-                    || (!string.IsNullOrWhiteSpace(baseKey)
-                        && IsAutoConnectKeyMatch(existing, baseKey))) > 0;
+            AppendNotification($"[Warn] Auto-Connect-Einstellung konnte nicht gespeichert werden: {ex.Message}");
         }
-
-        if (!changed)
-        {
-            return;
-        }
-
-        _config.Usb.AutoConnectDeviceKeys = keys
-            .Where(static entry => !string.IsNullOrWhiteSpace(entry))
-            .Select(static entry => entry.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        await _saveConfigAsync(_config);
-        AppendNotification(enabled
-            ? $"[Info] Auto-Connect aktiviert für: {selected.Description}"
-            : $"[Info] Auto-Connect deaktiviert für: {selected.Description}");
     }
 
     public async Task CheckForUpdatesOnStartupIfEnabledAsync()
@@ -4384,35 +4319,25 @@ internal sealed class GuestMainWindow : Window
 
         try
         {
-            AppendNotification("[Info] Suche Hostname (Hyper-V Socket), sonst IP-Fallback …");
+            AppendNotification("[Info] Suche Hostname über Hyper-V Socket …");
 
             var discoveredTarget = (await _discoverUsbHostAddressAsync() ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(discoveredTarget))
             {
                 SetUsbHostSearchStatus("Kein Host gefunden", UsbHostSearchStatusKind.Error);
-                AppendNotification("[Warn] Kein Hostname/IP gefunden. Stelle sicher, dass die Host-App läuft.");
+                AppendNotification("[Warn] Kein Hostname gefunden. Stelle sicher, dass die Host-App läuft.");
                 return;
             }
 
-            _usbHostAddressTextBox.Text = discoveredTarget;
             _config.Usb ??= new GuestUsbSettings();
-            _config.Usb.HostAddress = discoveredTarget;
+            _config.Usb.HostName = discoveredTarget;
             await _saveConfigAsync(_config);
 
             UpdateUsbTransportModePresentation();
             UpdateHostDiscoveryPresentation();
 
-            var discoveredHostName = (_config.Usb.HostName ?? string.Empty).Trim();
-            if (!string.IsNullOrWhiteSpace(discoveredHostName))
-            {
-                SetUsbHostSearchStatus($"Hostname gefunden: {discoveredHostName}", UsbHostSearchStatusKind.Success);
-                AppendNotification($"[Info] Hostname gefunden: {discoveredHostName}");
-            }
-            else
-            {
-                SetUsbHostSearchStatus($"IP-Fallback gefunden: {discoveredTarget}", UsbHostSearchStatusKind.Success);
-                AppendNotification($"[Info] Kein Hostname gefunden, IP-Fallback: {discoveredTarget}");
-            }
+            SetUsbHostSearchStatus($"Hostname gefunden: {discoveredTarget}", UsbHostSearchStatusKind.Success);
+            AppendNotification($"[Info] Hostname gefunden: {discoveredTarget}");
         }
         catch (Exception ex)
         {
@@ -4423,7 +4348,7 @@ internal sealed class GuestMainWindow : Window
         {
             if (_usbHostSearchButton is not null)
             {
-                _usbHostSearchButton.IsEnabled = _usbHostAddressEditorCard.Visibility == Visibility.Visible;
+                _usbHostSearchButton.IsEnabled = true;
             }
         }
     }

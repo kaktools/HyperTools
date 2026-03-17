@@ -88,6 +88,7 @@ internal sealed class GuestResourceMonitorAgent : IDisposable
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         linkedCts.CancelAfter(TimeSpan.FromMilliseconds(1200));
 
+        using var gateLease = await HyperVSocketClientConcurrencyGate.AcquireAsync(linkedCts.Token);
         using var socket = new Socket((AddressFamily)34, SocketType.Stream, (ProtocolType)1);
         linkedCts.Token.ThrowIfCancellationRequested();
         socket.Connect(new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, HyperVSocketUsbTunnelDefaults.ResourceMonitorServiceId));

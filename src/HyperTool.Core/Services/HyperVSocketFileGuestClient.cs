@@ -53,6 +53,7 @@ public sealed class HyperVSocketFileGuestClient
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         linkedCts.CancelAfter(TimeSpan.FromMilliseconds(6000));
+        using var gateLease = await HyperVSocketClientConcurrencyGate.AcquireAsync(linkedCts.Token);
 
         using var socket = new Socket((AddressFamily)34, SocketType.Stream, (ProtocolType)1);
         linkedCts.Token.ThrowIfCancellationRequested();

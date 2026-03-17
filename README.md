@@ -4,13 +4,16 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.5.4**
+- Version: **v2.5.7**
 - Snapshot-Beschreibungen bleiben nach Reload/Neustart erhalten (persistente Override-Speicherung im Host).
 - Host-USB-Auto-Detach nutzt jetzt eine klare Trigger-Policy: nur bei Guest-Disconnect oder wenn die zugehörige VM-ID mindestens 10 Sekunden nicht läuft.
 - In der Host-USB-Leiste gibt es einen dedizierten `Detach`-Button direkt neben `Share` und `Unshare`.
 - Der UI-Schalter für automatisches Detach wurde entfernt; die Option ist weiterhin per Config steuerbar.
 - Detach (manuell + Auto-Detach) läuft im Host ohne zusätzliche UAC-Elevation.
 - Recovery bei stale Exports ist wieder begrenzt aktiv: Retry/Grace/Delay aus der Host-Config plus Guest-Signal bei wiederholtem `already exported`.
+- Guest nutzt für USB jetzt ausschließlich Hyper-V Socket; IP-Mode/IP-Fallback wurde entfernt.
+- USB-Header-Chip zeigt den Hyper-V-Zustand klar als aktiv (grün), inaktiv (grau) oder Fehler (rot).
+- Shared-Folder-Ersetzen im Guest ist korrigiert: Explorer-Dialog `Datei ersetzen` funktioniert ohne `Ungültige MS-DOS-Funktion`.
 
 ## Projekte
 
@@ -38,8 +41,9 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 ### Guest (HyperTool.Guest.exe)
 
 - USB-Geräte vom Host laden, Connect/Disconnect.
-- USB-Host-Sektion mit sichtbaren Transportmodus-Chips (Hyper-V Socket / IP-Mode) und modeabhängiger Aktivierung des Host-IP-Felds.
-- Tray Control Center: usbip-win2-Status (grün/rot), kompakter USB-Bereich, Installationsbutton bei fehlendem Client und direkte Modusanzeige (Hyper-V Socket/IP).
+- USB-Host-Sektion als Hyper-V-only Betrieb mit Status-Chip und Hostname-Aktualisierung.
+- Shared Folder, Host-Identity und Resource-Monitor laufen weiterhin ausschließlich über Hyper-V Socket.
+- Tray Control Center: usbip-win2-Status (grün/rot), kompakter USB-Bereich und Installationsbutton bei fehlendem Client.
 - Shared Folder: Host-Katalog laden, Laufwerkszuordnungen anwenden und Mount-Status überwachen (WinFsp-basiert).
 - Start mit Windows, Start minimiert, Minimize-to-Tray.
 - Guest Control Center im Tray mit USB-Aktionen.

@@ -10,10 +10,16 @@ namespace HyperTool.Services;
 
 public sealed class HyperVSocketHostIdentityHostListener : IDisposable
 {
+    private const int MaxConcurrentClients = 24;
     private readonly Guid _serviceId;
     private readonly Func<HostFeatureAvailability>? _featureAvailabilityProvider;
     private readonly Func<IReadOnlyList<UsbDeviceMetadataEntry>>? _usbMetadataProvider;
     private readonly Func<IReadOnlyList<UsbDeviceHostDescriptionEntry>>? _usbDescriptionProvider;
+    private readonly object _snapshotSync = new();
+    private HostFeatureAvailability _lastFeatureAvailability = new();
+    private List<UsbDeviceMetadataEntry> _lastUsbMetadataSnapshot = [];
+    private List<UsbDeviceHostDescriptionEntry> _lastUsbDescriptionSnapshot = [];
+    private readonly SemaphoreSlim _clientHandlerGate = new(MaxConcurrentClients, MaxConcurrentClients);
     private Socket? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoopTask;
@@ -80,6 +86,7 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             Socket? socket = null;
+            var gateEntered = false;
             try
             {
                 if (_listener is null)
@@ -87,16 +94,26 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
                     break;
                 }
 
+                await _clientHandlerGate.WaitAsync(cancellationToken);
+                gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
                 _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
             }
             catch (OperationCanceledException)
             {
+                if (gateEntered)
+                {
+                    _clientHandlerGate.Release();
+                }
                 break;
             }
             catch
             {
                 socket?.Dispose();
+                if (gateEntered)
+                {
+                    _clientHandlerGate.Release();
+                }
                 if (cancellationToken.IsCancellationRequested)
                 {
                     break;
@@ -107,36 +124,69 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
 
     private async Task HandleClientAsync(Socket socket, CancellationToken cancellationToken)
     {
-        await using var stream = new NetworkStream(socket, ownsSocket: true);
+        try
+        {
+            await using var stream = new NetworkStream(socket, ownsSocket: true);
 
         HostFeatureAvailability featureAvailability;
         try
         {
             featureAvailability = _featureAvailabilityProvider?.Invoke() ?? new HostFeatureAvailability();
+            lock (_snapshotSync)
+            {
+                _lastFeatureAvailability = CloneFeatureAvailability(featureAvailability);
+            }
         }
         catch
         {
-            featureAvailability = new HostFeatureAvailability();
+            lock (_snapshotSync)
+            {
+                featureAvailability = CloneFeatureAvailability(_lastFeatureAvailability);
+            }
         }
 
         IReadOnlyList<UsbDeviceMetadataEntry> usbMetadata;
         try
         {
             usbMetadata = _usbMetadataProvider?.Invoke() ?? [];
+            lock (_snapshotSync)
+            {
+                _lastUsbMetadataSnapshot = usbMetadata
+                    .Where(entry => entry is not null)
+                    .Select(CloneMetadataEntry)
+                    .ToList();
+            }
         }
         catch
         {
-            usbMetadata = [];
+            lock (_snapshotSync)
+            {
+                usbMetadata = _lastUsbMetadataSnapshot
+                    .Select(CloneMetadataEntry)
+                    .ToList();
+            }
         }
 
         IReadOnlyList<UsbDeviceHostDescriptionEntry> usbDescriptions;
         try
         {
             usbDescriptions = _usbDescriptionProvider?.Invoke() ?? [];
+            lock (_snapshotSync)
+            {
+                _lastUsbDescriptionSnapshot = usbDescriptions
+                    .Where(entry => entry is not null)
+                    .Select(CloneDescriptionEntry)
+                    .ToList();
+            }
         }
         catch
         {
-            usbDescriptions = [];
+            lock (_snapshotSync)
+            {
+                usbDescriptions = _lastUsbDescriptionSnapshot
+                    .Select(CloneDescriptionEntry)
+                    .ToList();
+            }
         }
 
         featureAvailability.UsbDeviceMetadata = usbMetadata
@@ -176,28 +226,33 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
             .Where(entry => !string.IsNullOrWhiteSpace(entry.BusId))
             .ToList();
 
-        var payload = JsonSerializer.Serialize(new
-        {
-            hostName = Environment.MachineName,
-            fqdn = ResolveFqdn(),
-            features = new
+            var payload = JsonSerializer.Serialize(new
             {
-                usbSharingEnabled = featureAvailability.UsbSharingEnabled,
-                sharedFoldersEnabled = featureAvailability.SharedFoldersEnabled,
-                usbDeviceMetadata = featureAvailability.UsbDeviceMetadata,
-                usbDeviceDescriptions = featureAvailability.UsbDeviceDescriptions,
-                usbDeviceAttachments = featureAvailability.UsbDeviceAttachments
-            },
-            timestampUtc = DateTime.UtcNow
-        }, SerializerOptions);
+                hostName = Environment.MachineName,
+                fqdn = ResolveFqdn(),
+                features = new
+                {
+                    usbSharingEnabled = featureAvailability.UsbSharingEnabled,
+                    sharedFoldersEnabled = featureAvailability.SharedFoldersEnabled,
+                    usbDeviceMetadata = featureAvailability.UsbDeviceMetadata,
+                    usbDeviceDescriptions = featureAvailability.UsbDeviceDescriptions,
+                    usbDeviceAttachments = featureAvailability.UsbDeviceAttachments
+                },
+                timestampUtc = DateTime.UtcNow
+            }, SerializerOptions);
 
-        await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 1024, leaveOpen: false)
+            await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 1024, leaveOpen: false)
+            {
+                NewLine = "\n"
+            };
+
+            await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
+            await writer.FlushAsync(cancellationToken);
+        }
+        finally
         {
-            NewLine = "\n"
-        };
-
-        await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
-        await writer.FlushAsync(cancellationToken);
+            _clientHandlerGate.Release();
+        }
     }
 
     private static string ResolveFqdn()
@@ -211,6 +266,53 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         {
             return string.Empty;
         }
+    }
+
+    private static HostFeatureAvailability CloneFeatureAvailability(HostFeatureAvailability source)
+    {
+        return new HostFeatureAvailability
+        {
+            UsbSharingEnabled = source.UsbSharingEnabled,
+            SharedFoldersEnabled = source.SharedFoldersEnabled,
+            UsbDeviceMetadata = (source.UsbDeviceMetadata ?? [])
+                .Where(entry => entry is not null)
+                .Select(CloneMetadataEntry)
+                .ToList(),
+            UsbDeviceDescriptions = (source.UsbDeviceDescriptions ?? [])
+                .Where(entry => entry is not null)
+                .Select(CloneDescriptionEntry)
+                .ToList(),
+            UsbDeviceAttachments = (source.UsbDeviceAttachments ?? [])
+                .Where(entry => entry is not null)
+                .Select(entry => new UsbDeviceAttachmentEntry
+                {
+                    BusId = (entry.BusId ?? string.Empty).Trim(),
+                    GuestComputerName = (entry.GuestComputerName ?? string.Empty).Trim(),
+                    SourceVmId = (entry.SourceVmId ?? string.Empty).Trim(),
+                    GuestVmName = (entry.GuestVmName ?? string.Empty).Trim(),
+                    ClientIpAddress = (entry.ClientIpAddress ?? string.Empty).Trim()
+                })
+                .ToList()
+        };
+    }
+
+    private static UsbDeviceMetadataEntry CloneMetadataEntry(UsbDeviceMetadataEntry source)
+    {
+        return new UsbDeviceMetadataEntry
+        {
+            DeviceKey = (source.DeviceKey ?? string.Empty).Trim(),
+            CustomName = (source.CustomName ?? string.Empty).Trim(),
+            Comment = (source.Comment ?? string.Empty).Trim()
+        };
+    }
+
+    private static UsbDeviceHostDescriptionEntry CloneDescriptionEntry(UsbDeviceHostDescriptionEntry source)
+    {
+        return new UsbDeviceHostDescriptionEntry
+        {
+            DeviceKey = (source.DeviceKey ?? string.Empty).Trim(),
+            Description = (source.Description ?? string.Empty).Trim()
+        };
     }
 
     private bool TryRegisterServiceGuid()

@@ -66,12 +66,12 @@ public sealed class HelpWindow : Window
 
         var bodyCard = CreateCard(12);
         var bodyStack = new StackPanel { Spacing = 12 };
-        bodyStack.Children.Add(CreateSection("USB Transport", "Für USB kannst du zwischen Hyper-V Socket (bevorzugt) und IP-Mode umschalten. Der aktive Zustand wird direkt im USB-Bereich angezeigt."));
+        bodyStack.Children.Add(CreateSection("USB Transport", "USB läuft ausschließlich über Hyper-V Socket. Der aktive Zustand wird direkt im USB-Bereich angezeigt."));
         bodyStack.Children.Add(CreateSection("USB Status", "Im USB-Menü steht oben rechts ein Aktiv/Inaktiv-Status-Chip. Ist USB durch den Host deaktiviert, erscheint im Tabellenbereich ein zentrierter Hinweis 'Deaktiviert'; nach Host-Aktivierung wird nach ca. 1 Sekunde automatisch neu geladen."));
         bodyStack.Children.Add(CreateSection("USB Auto-Connect", "Für das ausgewählte Gerät kann Auto-Connect aktiviert werden. Die Verbindung erfolgt dann automatisch nach einem Refresh."));
         bodyStack.Children.Add(CreateSection("Shared Folder", "Shared Folder läuft über Hyper-V Socket / HyperTool File Service und benötigt im Guest zusätzlich WinFsp. Der Bereich nutzt ebenfalls den Aktiv/Inaktiv-Status-Chip. Bei deaktivierter Funktion zeigt die Tabelle zentral 'Deaktiviert' und wird nach Reaktivierung automatisch aktualisiert."));
         bodyStack.Children.Add(CreateSection("Shared Folder Anwenden", "Änderungen an einzelnen Shares werden gesammelt und erst über 'Änderungen anwenden' aktiv, damit laufende Zugriffe auf andere Shares stabil bleiben."));
-        bodyStack.Children.Add(CreateSection("Transport Diagnose", "Im Info-Bereich siehst du Hyper-V Socket-, Registry- und Fallback-Status; der Test-Button prüft den Socket direkt."));
+        bodyStack.Children.Add(CreateSection("Transport Diagnose", "Im Info-Bereich siehst du Hyper-V Socket- und Registry-Status; der Test-Button prüft den Socket direkt."));
         bodyStack.Children.Add(CreateSection("Einstellungen", "Tasktray-Verhalten, Start mit Windows, Start minimiert, Updatecheck beim Start und Theme konfigurieren. Über 'Tool neu starten' wird die App mit kurzem Reload-Screen neu geladen."));
         bodyStack.Children.Add(CreateSection("Single Instance", "Ein zweiter Start blendet die bereits laufende Guest-App ein."));
         bodyStack.Children.Add(CreateSection("Tray Control Center", "Linksklick und Rechtsklick im Tray öffnen das USB-zentrierte Control Center mit Schnellaktionen."));

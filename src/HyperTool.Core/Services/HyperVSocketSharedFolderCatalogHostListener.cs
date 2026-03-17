@@ -8,8 +8,10 @@ namespace HyperTool.Services;
 
 public sealed class HyperVSocketSharedFolderCatalogHostListener : IDisposable
 {
+    private const int MaxConcurrentClients = 24;
     private readonly Guid _serviceId;
     private readonly Func<IReadOnlyList<HostSharedFolderDefinition>> _catalogProvider;
+    private readonly SemaphoreSlim _clientHandlerGate = new(MaxConcurrentClients, MaxConcurrentClients);
     private Socket? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoopTask;
@@ -72,6 +74,7 @@ public sealed class HyperVSocketSharedFolderCatalogHostListener : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             Socket? socket = null;
+            var gateEntered = false;
             try
             {
                 if (_listener is null)
@@ -79,16 +82,26 @@ public sealed class HyperVSocketSharedFolderCatalogHostListener : IDisposable
                     break;
                 }
 
+                await _clientHandlerGate.WaitAsync(cancellationToken);
+                gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
                 _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
             }
             catch (OperationCanceledException)
             {
+                if (gateEntered)
+                {
+                    _clientHandlerGate.Release();
+                }
                 break;
             }
             catch
             {
                 socket?.Dispose();
+                if (gateEntered)
+                {
+                    _clientHandlerGate.Release();
+                }
                 if (cancellationToken.IsCancellationRequested)
                 {
                     break;
@@ -99,35 +112,42 @@ public sealed class HyperVSocketSharedFolderCatalogHostListener : IDisposable
 
     private async Task HandleClientAsync(Socket socket, CancellationToken cancellationToken)
     {
-        await using var stream = new NetworkStream(socket, ownsSocket: true);
-
-        IReadOnlyList<HostSharedFolderDefinition> catalog;
         try
         {
-            catalog = _catalogProvider() ?? [];
+            await using var stream = new NetworkStream(socket, ownsSocket: true);
+
+            IReadOnlyList<HostSharedFolderDefinition> catalog;
+            try
+            {
+                catalog = _catalogProvider() ?? [];
+            }
+            catch
+            {
+                catalog = [];
+            }
+
+            var payload = JsonSerializer.Serialize(catalog.Select(item => new HostSharedFolderDefinition
+            {
+                Id = item.Id,
+                Label = item.Label,
+                LocalPath = item.LocalPath,
+                ShareName = item.ShareName,
+                Enabled = item.Enabled,
+                ReadOnly = item.ReadOnly
+            }).ToList(), CatalogSerializerOptions);
+
+            await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 1024, leaveOpen: false)
+            {
+                NewLine = "\n"
+            };
+
+            await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
+            await writer.FlushAsync(cancellationToken);
         }
-        catch
+        finally
         {
-            catalog = [];
+            _clientHandlerGate.Release();
         }
-
-        var payload = JsonSerializer.Serialize(catalog.Select(item => new HostSharedFolderDefinition
-        {
-            Id = item.Id,
-            Label = item.Label,
-            LocalPath = item.LocalPath,
-            ShareName = item.ShareName,
-            Enabled = item.Enabled,
-            ReadOnly = item.ReadOnly
-        }).ToList(), CatalogSerializerOptions);
-
-        await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 1024, leaveOpen: false)
-        {
-            NewLine = "\n"
-        };
-
-        await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
-        await writer.FlushAsync(cancellationToken);
     }
 
     private bool TryRegisterServiceGuid()

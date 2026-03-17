@@ -9,6 +9,7 @@ namespace HyperTool.Services;
 
 public sealed class HyperVSocketResourceMonitorHostListener : IDisposable
 {
+    private const int MaxConcurrentClients = 32;
     private static readonly JsonSerializerOptions PacketJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -16,6 +17,7 @@ public sealed class HyperVSocketResourceMonitorHostListener : IDisposable
 
     private readonly Action<ResourceMonitorPacket> _onPacket;
     private readonly Guid _serviceId;
+    private readonly SemaphoreSlim _clientHandlerGate = new(MaxConcurrentClients, MaxConcurrentClients);
     private Socket? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoopTask;
@@ -52,6 +54,7 @@ public sealed class HyperVSocketResourceMonitorHostListener : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             Socket? socket = null;
+            var gateEntered = false;
             try
             {
                 if (_listener is null)
@@ -59,16 +62,26 @@ public sealed class HyperVSocketResourceMonitorHostListener : IDisposable
                     break;
                 }
 
+                await _clientHandlerGate.WaitAsync(cancellationToken);
+                gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
                 _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
             }
             catch (OperationCanceledException)
             {
+                if (gateEntered)
+                {
+                    _clientHandlerGate.Release();
+                }
                 break;
             }
             catch
             {
                 socket?.Dispose();
+                if (gateEntered)
+                {
+                    _clientHandlerGate.Release();
+                }
                 if (cancellationToken.IsCancellationRequested)
                 {
                     break;
@@ -79,40 +92,47 @@ public sealed class HyperVSocketResourceMonitorHostListener : IDisposable
 
     private async Task HandleClientAsync(Socket socket, CancellationToken cancellationToken)
     {
-        var sourceVmId = TryGetRemoteVmId(socket);
-        await using var stream = new NetworkStream(socket, ownsSocket: true);
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 512, leaveOpen: false);
-
-        string? line;
         try
         {
-            line = await reader.ReadLineAsync(cancellationToken);
-        }
-        catch
-        {
-            return;
-        }
+            var sourceVmId = TryGetRemoteVmId(socket);
+            await using var stream = new NetworkStream(socket, ownsSocket: true);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 512, leaveOpen: false);
 
-        if (string.IsNullOrWhiteSpace(line))
-        {
-            return;
-        }
-
-        try
-        {
-            var packet = JsonSerializer.Deserialize<ResourceMonitorPacket>(line.Trim(), PacketJsonOptions);
-            if (packet is not null)
+            string? line;
+            try
             {
-                if (string.IsNullOrWhiteSpace(packet.SourceVmId) && !string.IsNullOrWhiteSpace(sourceVmId))
-                {
-                    packet.SourceVmId = sourceVmId;
-                }
+                line = await reader.ReadLineAsync(cancellationToken);
+            }
+            catch
+            {
+                return;
+            }
 
-                _onPacket(packet);
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                return;
+            }
+
+            try
+            {
+                var packet = JsonSerializer.Deserialize<ResourceMonitorPacket>(line.Trim(), PacketJsonOptions);
+                if (packet is not null)
+                {
+                    if (string.IsNullOrWhiteSpace(packet.SourceVmId) && !string.IsNullOrWhiteSpace(sourceVmId))
+                    {
+                        packet.SourceVmId = sourceVmId;
+                    }
+
+                    _onPacket(packet);
+                }
+            }
+            catch
+            {
             }
         }
-        catch
+        finally
         {
+            _clientHandlerGate.Release();
         }
     }
 

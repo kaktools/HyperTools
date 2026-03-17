@@ -348,6 +348,7 @@ internal static class GuestConfigService
             : config.Handshake.FilePath.Trim();
 
         config.Usb ??= new GuestUsbSettings();
+        config.Usb.UseHyperVSocket = true;
         config.Usb.HostAddress = (config.Usb.HostAddress ?? string.Empty).Trim();
         config.Usb.HostName = (config.Usb.HostName ?? string.Empty).Trim();
         config.Usb.HyperVSocketServiceId = string.IsNullOrWhiteSpace(config.Usb.HyperVSocketServiceId)

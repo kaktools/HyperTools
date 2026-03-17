@@ -15,6 +15,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Net.Sockets;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -29,6 +30,7 @@ namespace HyperTool.WinUI;
 public sealed partial class App : Application
 {
     private const int HostUsbAutoRefreshSeconds = 5;
+    private static readonly TimeSpan HostHyperVMonitorHeartbeatInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan HostUsbTunnelSelfHealBackoff = TimeSpan.FromSeconds(20);
     private const int UsbDisconnectDebounceMilliseconds = 4500;
     private const string SingleInstanceMutexName = @"Local\HyperTool.WinUI.SingleInstance";
@@ -86,6 +88,23 @@ public sealed partial class App : Application
     private readonly Dictionary<string, CancellationTokenSource> _pendingUsbDisconnectDebounceByKey = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _lastHostUsbTunnelSelfHealAttemptUtc = DateTimeOffset.MinValue;
     private int _hostUsbTunnelSelfHealFailureCount;
+    private bool _hostHyperVMonitorEnabled;
+    private CancellationTokenSource? _hostHyperVMonitorCts;
+    private Task? _hostHyperVMonitorTask;
+    private readonly object _hostHyperVMetricsSync = new();
+    private long _metricDiagnosticsAckReceived;
+    private long _metricFileServiceRequestsServed;
+    private long _metricResourceMonitorPacketsReceived;
+    private long _metricResourceMonitorLoopFailures;
+    private long _metricUsbPushBroadcastAttempts;
+    private long _metricUsbPushBroadcastFailures;
+    private DateTimeOffset? _lastDiagnosticsAckUtc;
+    private string? _lastDiagnosticsAckEventType;
+    private DateTimeOffset? _lastFileServiceRequestUtc;
+    private DateTimeOffset? _lastResourceMonitorPacketUtc;
+    private object? _lastHostHyperVFailure;
+    private object? _lastResourceMonitorLoopFailure;
+    private object? _lastUsbPushBroadcastFailure;
 
     private MainWindow? _mainWindow;
     private MainViewModel? _mainViewModel;
@@ -247,6 +266,7 @@ public sealed partial class App : Application
             var logPath = InitializeLogging(configResult.Config.Ui.DebugLoggingEnabled);
             Log.Information("Logging initialized at {LogPath}", logPath);
             Log.Debug("Host configuration loaded. ConfigPath={ConfigPath}; DebugLoggingEnabled={DebugLoggingEnabled}", configResult.ConfigPath, configResult.Config.Ui.DebugLoggingEnabled);
+            _hostHyperVMonitorEnabled = configResult.Config.Ui.DebugLoggingEnabled;
 
             EnsureHyperVSocketServiceRegistrationsAtStartup();
             Log.Debug("Starting host communication listeners.");
@@ -311,6 +331,7 @@ public sealed partial class App : Application
             StartUsbDiagnosticsLoop();
             StartUsbHostDiscoveryResponder();
             StartUsbAutoRefreshLoop();
+            StartHostHyperVMonitorLoop();
             Log.Debug("Main window, tray services, and background loops initialized.");
 
             var shouldForceShowFromSecondLaunch = _pendingSingleInstanceShow;
@@ -392,6 +413,7 @@ public sealed partial class App : Application
             StopUsbDiagnosticsLoop();
             StopUsbHostDiscoveryResponder();
             StopUsbAutoRefreshLoop();
+            StopHostHyperVMonitorLoop();
             StopUsbEventRefreshScheduling();
             _usbDiagnosticsHostListener?.Dispose();
             _usbDiagnosticsHostListener = null;
@@ -458,6 +480,7 @@ public sealed partial class App : Application
             StopUsbDiagnosticsLoop();
             StopUsbHostDiscoveryResponder();
             StopUsbAutoRefreshLoop();
+            StopHostHyperVMonitorLoop();
             StopUsbEventRefreshScheduling();
             _usbDiagnosticsHostListener?.Dispose();
             _usbDiagnosticsHostListener = null;
@@ -512,6 +535,8 @@ public sealed partial class App : Application
             StartResourceMonitorListenerWithRecovery(isThemeRestart: true);
             StartUsbChangeNotificationListenerWithRecovery(isThemeRestart: true);
             StartResourceMonitorLoop();
+            _hostHyperVMonitorEnabled = _mainViewModel.UiDebugLoggingEnabled;
+            StartHostHyperVMonitorLoop();
 
             try
             {
@@ -1880,6 +1905,30 @@ public sealed partial class App : Application
         _usbDiagnosticsTask = Task.Run(() => RunUsbDiagnosticsLoopAsync(cts.Token));
     }
 
+    private void StartHostHyperVMonitorLoop()
+    {
+        StopHostHyperVMonitorLoop();
+
+        var cts = new CancellationTokenSource();
+        _hostHyperVMonitorCts = cts;
+        _hostHyperVMonitorTask = Task.Run(() => RunHostHyperVMonitorLoopAsync(cts.Token));
+    }
+
+    private void StopHostHyperVMonitorLoop()
+    {
+        try
+        {
+            _hostHyperVMonitorCts?.Cancel();
+        }
+        catch
+        {
+        }
+
+        _hostHyperVMonitorCts?.Dispose();
+        _hostHyperVMonitorCts = null;
+        _hostHyperVMonitorTask = null;
+    }
+
     private void StopUsbDiagnosticsLoop()
     {
         try
@@ -2074,7 +2123,7 @@ public sealed partial class App : Application
             {
                 _lastUsbShareStateFingerprint = newFingerprint;
                 Log.Debug("USB share state changed - notifying guest subscribers via push channel.");
-                _ = _usbChangeNotificationHostListener.BroadcastAsync();
+                _ = BroadcastUsbChangeNotificationAsync();
             }
             else if (newFingerprint is not null && !string.Equals(newFingerprint, _lastUsbShareStateFingerprint, StringComparison.Ordinal))
             {
@@ -2084,6 +2133,36 @@ public sealed partial class App : Application
         finally
         {
             _hostUsbRefreshGate.Release();
+        }
+    }
+
+    private async Task BroadcastUsbChangeNotificationAsync()
+    {
+        var listener = _usbChangeNotificationHostListener;
+        if (listener is null)
+        {
+            return;
+        }
+
+        lock (_hostHyperVMetricsSync)
+        {
+            _metricUsbPushBroadcastAttempts++;
+        }
+
+        try
+        {
+            await listener.BroadcastAsync();
+        }
+        catch (Exception ex)
+        {
+            TrackHostHyperVFailure("usb-change-notification.broadcast", ex);
+            lock (_hostHyperVMetricsSync)
+            {
+                _metricUsbPushBroadcastFailures++;
+                _lastUsbPushBroadcastFailure = BuildExceptionSnapshot("usb-change-notification.broadcast", ex);
+            }
+
+            Log.Debug(ex, "USB change-notification broadcast failed.");
         }
     }
 
@@ -2105,12 +2184,20 @@ public sealed partial class App : Application
 
     private void ProcessDiagnosticsAck(HyperVSocketDiagnosticsAck ack, bool isThemeRestart)
     {
+        lock (_hostHyperVMetricsSync)
+        {
+            _metricDiagnosticsAckReceived++;
+            _lastDiagnosticsAckUtc = DateTimeOffset.UtcNow;
+            _lastDiagnosticsAckEventType = ack.EventType;
+        }
+
         try
         {
             UsbGuestConnectionRegistry.UpdateFromDiagnosticsAck(ack);
         }
         catch (Exception ex)
         {
+            TrackHostHyperVFailure("diagnostics-ack.registry-update", ex);
             Log.Warning(ex, "Diagnostics ack registry update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
         }
 
@@ -2127,6 +2214,7 @@ public sealed partial class App : Application
                     }
                     catch (Exception ex)
                     {
+                        TrackHostHyperVFailure("diagnostics-ack.network-update-dispatch", ex);
                         Log.Warning(ex, "Diagnostics ack network update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
                     }
                 });
@@ -2139,6 +2227,7 @@ public sealed partial class App : Application
         }
         catch (Exception ex)
         {
+            TrackHostHyperVFailure("diagnostics-ack.network-update", ex);
             Log.Warning(ex, "Diagnostics ack network update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
         }
 
@@ -2168,6 +2257,7 @@ public sealed partial class App : Application
                         }
                         catch (Exception ex)
                         {
+                            TrackHostHyperVFailure("diagnostics-ack.resource-update-dispatch", ex);
                             Log.Warning(ex, "Diagnostics ack resource update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
                         }
                     });
@@ -2187,6 +2277,7 @@ public sealed partial class App : Application
             }
             catch (Exception ex)
             {
+                TrackHostHyperVFailure("diagnostics-ack.resource-update", ex);
                 Log.Warning(ex, "Diagnostics ack resource update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
             }
         }
@@ -2468,6 +2559,118 @@ public sealed partial class App : Application
                 break;
             }
         }
+    }
+
+    private async Task RunHostHyperVMonitorLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var debugMode = _hostHyperVMonitorEnabled || (_mainViewModel?.UiDebugLoggingEnabled == true);
+                if (!_isExitRequested && debugMode)
+                {
+                    var snapshot = BuildHostHyperVMonitorSnapshot();
+                    Log.Debug("hyperv.host.monitor.heartbeat {@Snapshot}", snapshot);
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                await Task.Delay(HostHyperVMonitorHeartbeatInterval, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+    }
+
+    private object BuildHostHyperVMonitorSnapshot()
+    {
+        lock (_hostHyperVMetricsSync)
+        {
+            return new
+            {
+                transport = new
+                {
+                    hostComputerName = Environment.MachineName,
+                    usbTunnelRunning = _usbHostTunnel?.IsRunning == true,
+                    sharedFolderFileServiceSocketActive = _sharedFolderFileServiceSocketActive,
+                    debugLoggingEnabled = _mainViewModel?.UiDebugLoggingEnabled ?? _hostHyperVMonitorEnabled
+                },
+                listeners = new
+                {
+                    diagnostics = _usbDiagnosticsHostListener?.IsRunning == true,
+                    sharedFolderCatalog = _sharedFolderCatalogHostListener?.IsRunning == true,
+                    hostIdentity = _hostIdentityHostListener?.IsRunning == true,
+                    fileService = _fileHostListener?.IsRunning == true,
+                    resourceMonitor = _resourceMonitorHostListener?.IsRunning == true,
+                    usbChangeNotification = _usbChangeNotificationHostListener?.IsRunning == true,
+                    usbChangeNotificationSubscribers = _usbChangeNotificationHostListener?.SubscriberCount ?? 0
+                },
+                tasks = new
+                {
+                    usbDiagnosticsLoopRunning = _usbDiagnosticsTask is { IsCompleted: false },
+                    usbHostDiscoveryResponderRunning = _usbHostDiscoveryTask is { IsCompleted: false },
+                    usbAutoRefreshLoopRunning = _usbAutoRefreshTask is { IsCompleted: false },
+                    resourceMonitorLoopRunning = _resourceMonitorTask is { IsCompleted: false },
+                    hostHyperVMonitorLoopRunning = _hostHyperVMonitorTask is { IsCompleted: false }
+                },
+                registration = new
+                {
+                    allRequiredServicesRegistered = GetMissingHyperVSocketServiceIds().Count == 0,
+                    missingServiceIds = GetMissingHyperVSocketServiceIds()
+                },
+                metrics = new
+                {
+                    diagnosticsAckReceived = _metricDiagnosticsAckReceived,
+                    lastDiagnosticsAckUtc = _lastDiagnosticsAckUtc,
+                    lastDiagnosticsAckEventType = _lastDiagnosticsAckEventType,
+                    fileServiceRequestsServed = _metricFileServiceRequestsServed,
+                    lastFileServiceRequestUtc = _lastFileServiceRequestUtc,
+                    resourceMonitorPacketsReceived = _metricResourceMonitorPacketsReceived,
+                    lastResourceMonitorPacketUtc = _lastResourceMonitorPacketUtc,
+                    resourceMonitorLoopFailures = _metricResourceMonitorLoopFailures,
+                    usbPushBroadcastAttempts = _metricUsbPushBroadcastAttempts,
+                    usbPushBroadcastFailures = _metricUsbPushBroadcastFailures,
+                    lastSharedFolderFileServiceActivityUtc = _sharedFolderFileServiceLastActivityUtc
+                },
+                lastFailures = new
+                {
+                    hostHyperVFailure = _lastHostHyperVFailure,
+                    resourceMonitorLoopFailure = _lastResourceMonitorLoopFailure,
+                    usbPushBroadcastFailure = _lastUsbPushBroadcastFailure
+                }
+            };
+        }
+    }
+
+    private void TrackHostHyperVFailure(string stage, Exception ex)
+    {
+        lock (_hostHyperVMetricsSync)
+        {
+            _lastHostHyperVFailure = BuildExceptionSnapshot(stage, ex);
+        }
+    }
+
+    private static object BuildExceptionSnapshot(string stage, Exception ex)
+    {
+        return new
+        {
+            stage,
+            atUtc = DateTimeOffset.UtcNow,
+            exceptionType = ex.GetType().FullName,
+            ex.HResult,
+            ex.Message,
+            socketErrorCode = ex is SocketException socketEx ? socketEx.SocketErrorCode : (SocketError?)null,
+            nativeErrorCode = ex is SocketException nativeSocketEx ? nativeSocketEx.NativeErrorCode : (int?)null,
+            innerExceptionType = ex.InnerException?.GetType().FullName,
+            innerMessage = ex.InnerException?.Message
+        };
     }
 
     private void UpdateHostUsbDiagnostics()
@@ -3317,6 +3520,7 @@ public sealed partial class App : Application
         {
             _sharedFolderCatalogHostListener?.Dispose();
             _sharedFolderCatalogHostListener = null;
+            TrackHostHyperVFailure("listener.start.shared-folder-catalog", ex);
             Log.Warning(ex, isThemeRestart
                 ? "Hyper-V socket shared-folder catalog listener could not be restarted after theme change."
                 : "Hyper-V socket shared-folder catalog listener could not be started.");
@@ -3344,6 +3548,7 @@ public sealed partial class App : Application
         {
             _sharedFolderCatalogHostListener?.Dispose();
             _sharedFolderCatalogHostListener = null;
+            TrackHostHyperVFailure("listener.start.shared-folder-catalog.after-registration", ex);
             Log.Warning(ex, "Hyper-V socket shared-folder catalog listener still unavailable after elevated registration helper.");
         }
     }
@@ -3371,6 +3576,7 @@ public sealed partial class App : Application
         {
             _hostIdentityHostListener?.Dispose();
             _hostIdentityHostListener = null;
+            TrackHostHyperVFailure("listener.start.host-identity", ex);
             Log.Warning(ex, isThemeRestart
                 ? "Hyper-V socket host-identity listener could not be restarted after theme change."
                 : "Hyper-V socket host-identity listener could not be started.");
@@ -3405,6 +3611,7 @@ public sealed partial class App : Application
         {
             _hostIdentityHostListener?.Dispose();
             _hostIdentityHostListener = null;
+            TrackHostHyperVFailure("listener.start.host-identity.after-registration", ex);
             Log.Warning(ex, "Hyper-V socket host-identity listener still unavailable after elevated registration helper.");
         }
     }
@@ -3435,6 +3642,7 @@ public sealed partial class App : Application
             _fileHostListener = null;
             _sharedFolderFileServiceSocketActive = false;
             UpdateSharedFolderFileServiceStatusPanel();
+            TrackHostHyperVFailure("listener.start.file-service", ex);
             Log.Warning(ex, isThemeRestart
                 ? "Hyper-V socket file listener could not be restarted after theme change."
                 : "Hyper-V socket file listener could not be started.");
@@ -3469,6 +3677,7 @@ public sealed partial class App : Application
             _fileHostListener = null;
             _sharedFolderFileServiceSocketActive = false;
             UpdateSharedFolderFileServiceStatusPanel();
+            TrackHostHyperVFailure("listener.start.file-service.after-registration", ex);
             Log.Warning(ex, "Hyper-V socket file listener still unavailable after elevated registration helper.");
         }
     }
@@ -3484,6 +3693,12 @@ public sealed partial class App : Application
         {
             _resourceMonitorHostListener = new HyperVSocketResourceMonitorHostListener(packet =>
             {
+                lock (_hostHyperVMetricsSync)
+                {
+                    _metricResourceMonitorPacketsReceived++;
+                    _lastResourceMonitorPacketUtc = DateTimeOffset.UtcNow;
+                }
+
                 _ = DispatchGuestResourceMonitoringAsync(packet);
             });
             _resourceMonitorHostListener.Start();
@@ -3495,6 +3710,7 @@ public sealed partial class App : Application
         {
             _resourceMonitorHostListener?.Dispose();
             _resourceMonitorHostListener = null;
+            TrackHostHyperVFailure("listener.start.resource-monitor", ex);
             Log.Warning(ex, isThemeRestart
                 ? "Hyper-V socket resource monitor listener could not be restarted after theme change."
                 : "Hyper-V socket resource monitor listener could not be started.");
@@ -3515,6 +3731,7 @@ public sealed partial class App : Application
         {
             _usbChangeNotificationHostListener?.Dispose();
             _usbChangeNotificationHostListener = null;
+            TrackHostHyperVFailure("listener.start.usb-change-notification", ex);
             Log.Warning(ex, isThemeRestart
                 ? "Hyper-V socket USB change-notification listener could not be restarted after theme change."
                 : "Hyper-V socket USB change-notification listener could not be started.");
@@ -3686,6 +3903,12 @@ public sealed partial class App : Application
 
     private void LogResourceMonitorLoopFailure(Exception ex)
     {
+        lock (_hostHyperVMetricsSync)
+        {
+            _metricResourceMonitorLoopFailures++;
+            _lastResourceMonitorLoopFailure = BuildExceptionSnapshot("resource-monitor.loop", ex);
+        }
+
         var now = DateTimeOffset.UtcNow;
         if ((now - _resourceMonitorLoopLastFailureLogUtc) >= ResourceMonitorFailureLogInterval)
         {
@@ -3748,6 +3971,12 @@ public sealed partial class App : Application
 
     private void OnSharedFolderFileServiceRequestServed(DateTimeOffset servedAtUtc)
     {
+        lock (_hostHyperVMetricsSync)
+        {
+            _metricFileServiceRequestsServed++;
+            _lastFileServiceRequestUtc = servedAtUtc;
+        }
+
         _sharedFolderFileServiceLastActivityUtc = servedAtUtc;
         _sharedFolderFileServiceSocketActive = _fileHostListener?.IsRunning == true;
         UpdateSharedFolderFileServiceStatusPanel();

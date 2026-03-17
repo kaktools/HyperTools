@@ -1,6 +1,6 @@
 # HyperTool Release Notes
 
-## v2.5.5
+## v2.5.7
 
 ### Highlights
 
@@ -8,6 +8,7 @@
 - Multi-VM-USB-Zuordnung (`Connected By`/`Busy`) ist stabilisiert, auch bei schnellen Disconnect/Connect-Folgen.
 - Guest-Start wurde gegen sporadische Concurrent-Collection-Fehler im USB-Refresh gehärtet.
 - Konfigurationsmigration bereinigt bestehende Installationen stärker und setzt neue USB-Defaults konsistent.
+- Guest USB-Transport ist jetzt vollständig Hyper-V-only; IP-Mode/IP-Fallback und zugehörige UI-Artefakte wurden entfernt.
 
 ### Verbessert
 
@@ -17,12 +18,23 @@
 	- Während des Disconnect-Pfads blockiert die Grace-Phase keine regulären USB-Refreshes mehr.
 	- Physisch entfernte Geräte (`Attached` ohne `Connected`) werden beim Host-Refresh automatisch detacht.
 	- `usbipd`-Fehler `There is no device with busid ...` wird als No-Op behandelt.
+	- Hyper-V-Socket-Host-Listener (File, Diagnostics, Resource-Monitor, Host-Identity, Shared-Folder-Katalog, USB-Change-Notification) nutzen jetzt ein Concurrency-Gating, um ungebremste Handler-/Socket-Fächerung unter Last zu verhindern.
 - Multi-VM USB-Zuordnung:
 	- `usb-disconnected` für Gerät A entfernt nicht mehr versehentlich die `Connected By`-Zuordnung von Gerät B mit ähnlichem Hardware-Profil.
 	- Ack-Identity priorisiert `busid` vor `hardware`, um Kollisionen zu reduzieren.
 	- Guest-Share-Liste hält Geräte mit Host-Attachment-Hinweis weiter als `Busy`, auch wenn `Connected By` kurzzeitig noch leer ist.
 - Guest Stabilität:
 	- USB-Host-Caches wurden auf thread-safe Collections umgestellt; der sporadische Fehler `Operations that change non-concurrent collections...` nach Guest-Neustart ist behoben.
+	- Hyper-V-Socket-Clientpfade (File-Service, Shared-Folder-Katalog, Host-Identity, Diagnostics, Resource-Monitor) wurden auf ein gemeinsames Concurrency-Gating umgestellt, um Socket-Stürme (`NoBufferSpaceAvailable` / volle Warteschlangen) unter Last zu vermeiden.
+	- `NoBufferSpaceAvailable` wird beim Shared-Folder-Katalog jetzt als transient behandelt, damit Retry/Backoff greift statt sofortigem Abbruch.
+	- Neue Shared-Folder/Socket-Diagnostik in Guest-Logs: bei `sharedfolders.catalog.fetch_failed` und `sharedfolders.apply.catalog_failed` werden jetzt Gate-/Queue-Metriken (inflight, waiters, peak, average wait, slow acquires), Reconnect-Gate-Status und Config-Save-Rate mitgeloggt, um Überlaufursachen gezielt zu erkennen.
+	- WinFsp-Create-Integration im Guest korrigiert: bestehende Dateien werden bei `Create` nicht mehr implizit mit `truncate` angefasst; das verhindert Dateikorruption bei Copy/Paste im selben Shared-Folder.
+	- WinFsp-Overwrite-Integration im Guest ergänzt: Explorer-Flow `Datei ersetzen` funktioniert jetzt korrekt und bricht nicht mehr mit `Ungültige MS-DOS-Funktion` ab.
+	- USB-Kommentar-Sync Host→Guest gehärtet: nach erfolgreichem USB-Refresh wird Host-Identity mit Cooldown gezielt nachgezogen, und Fetch-Fehler werden rate-limited mit Socket-Details geloggt statt still geschluckt.
+	- Hyper-V-Socket-Monitoring im Guest erweitert: periodischer Debug-Heartbeat (`hyperv.monitor.heartbeat`) mit Transportstatus, Task-/Loop-Status, Gate-Metriken sowie Kanalzählern (Host-Identity, Shared-Folder-Katalog, ACKs, Hostauflösung) inkl. letzter Erfolgs-/Fehlerzustände.
+	- Guest transportiert USB ausschließlich über Hyper-V Socket; Discovery/Fallback über IP ist deaktiviert.
+	- Guest-UI bereinigt: kein IP-Mode-Toggle, kein Host-IP-Eingabefeld, Transport-Diagnose ohne Fallback-Zeile.
+	- USB-Header-Chip auf klare Zustände umgestellt: aktiv (grün), inaktiv (grau), Fehler (rot).
 - Konfigurationsmigration/Setup-Hygiene:
 	- Bestehende Konfigurationen werden schema-basiert bereinigt und einmalig neu geschrieben.
 	- Legacy-/ungültige USB-Identity-Keys in `usb.autoShareDeviceKeys` und `usb.deviceMetadata` werden entfernt.
@@ -31,7 +43,7 @@
 
 ### Doku
 
-- README auf `v2.5.5` aktualisiert (USB-Defaults und Config-Migration).
+- README auf `v2.5.7` aktualisiert (USB-Defaults, Config-Migration und Guest-Transportabgrenzung).
 
 ## v2.5.4
 
