@@ -60,6 +60,12 @@ public static class UsbGuestConnectionRegistry
 
             if (!string.IsNullOrWhiteSpace(deviceKey))
             {
+                if (!string.IsNullOrWhiteSpace(busId)
+                    && HasOtherBusMappingForDeviceKey(deviceKey, busId))
+                {
+                    skipDeviceKeyRemoval = true;
+                }
+
                 if (!skipDeviceKeyRemoval)
                 {
                     ConnectedGuestsByDeviceKey.TryRemove(deviceKey, out _);
@@ -418,19 +424,44 @@ public static class UsbGuestConnectionRegistry
             return "instance:" + instanceId;
         }
 
-        var hardwareId = NormalizeHardwareId(ack.HardwareId);
-        if (!string.IsNullOrWhiteSpace(hardwareId))
-        {
-            return "hardware:" + hardwareId;
-        }
-
         var busId = (ack.BusId ?? string.Empty).Trim();
         if (!string.IsNullOrWhiteSpace(busId))
         {
             return "busid:" + busId;
         }
 
+        var hardwareId = NormalizeHardwareId(ack.HardwareId);
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return "hardware:" + hardwareId;
+        }
+
         return string.Empty;
+    }
+
+    private static bool HasOtherBusMappingForDeviceKey(string deviceKey, string currentBusId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceKey))
+        {
+            return false;
+        }
+
+        var normalizedCurrentBusId = (currentBusId ?? string.Empty).Trim();
+        foreach (var kvp in DeviceKeyByBusId)
+        {
+            if (!string.Equals(kvp.Value, deviceKey, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(normalizedCurrentBusId)
+                || !string.Equals(kvp.Key, normalizedCurrentBusId, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static IEnumerable<string> BuildDeviceIdentityAliasKeys(UsbIpDeviceInfo device)

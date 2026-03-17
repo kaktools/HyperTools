@@ -2254,18 +2254,26 @@ public sealed partial class App : Application
 
                     if (!recoveredByRetry)
                     {
+                        var hasAttachedDevices = HasLocalAttachedUsbDevices();
                         var ipFallbackResolution = ResolveUsbHostAddressDiagnostics(preferHyperVSocket: false);
                         if (string.IsNullOrWhiteSpace(ipFallbackResolution.ResolvedIpv4))
                         {
                             throw;
                         }
 
-                        fallbackToIpUsed = true;
-                        fallbackToIpUsedForLog = true;
                         fallbackHostAddress = ipFallbackResolution.ResolvedIpv4;
                         fallbackReason = hyperVEx.Message;
                         fallbackExceptionType = hyperVEx.GetType().FullName;
-                        MarkHyperVDataPathFailure();
+
+                        // If a device is currently attached in the guest, keep Hyper-V as
+                        // authoritative transport state and use IP only as list fallback.
+                        if (!hasAttachedDevices)
+                        {
+                            fallbackToIpUsed = true;
+                            fallbackToIpUsedForLog = true;
+                            MarkHyperVDataPathFailure();
+                        }
+
                         list = await _usbService.GetRemoteDevicesAsync(ipFallbackResolution.ResolvedIpv4, CancellationToken.None);
                     }
                 }
@@ -4576,14 +4584,21 @@ public sealed partial class App : Application
             ? attachment.GuestVmName.Trim()
             : (attachment.GuestComputerName ?? string.Empty).Trim();
 
+        var hasRemoteAttachmentHint = !string.IsNullOrWhiteSpace(attachedGuest)
+            || !string.IsNullOrWhiteSpace((attachment.SourceVmId ?? string.Empty).Trim())
+            || !string.IsNullOrWhiteSpace((attachment.ClientIpAddress ?? string.Empty).Trim());
+
         if (hasLocalPortAttachment)
         {
             // Preserve local attachment state from usbip client output.
             return;
         }
 
-        device.IsAttachedByOtherGuest = !string.IsNullOrWhiteSpace(attachedGuest);
-        device.AttachedGuestComputerName = device.IsAttachedByOtherGuest ? attachedGuest : string.Empty;
+        // Host attachment hint is authoritative for busy/available decision.
+        device.IsAttachedByOtherGuest = hasRemoteAttachmentHint || _hostUsbAttachmentsByBusId.ContainsKey(busId);
+        device.AttachedGuestComputerName = device.IsAttachedByOtherGuest
+            ? (!string.IsNullOrWhiteSpace(attachedGuest) ? attachedGuest : "(anderer Guest)")
+            : string.Empty;
         // Keep ClientIpAddress empty for remote ownership hints so local attach logic stays deterministic.
         device.ClientIpAddress = string.Empty;
     }
@@ -4625,6 +4640,19 @@ public sealed partial class App : Application
                 }
                 else
                 {
+                    if (HasLocalAttachedUsbDevices())
+                    {
+                        // Keep the transport bridge stable while an attachment is active;
+                        // failed probes are expected under some idle/power transitions.
+                        _usbHyperVSocketServiceReachable = true;
+                        _usbHyperVSocketProbeFailureCount = Math.Min(
+                            _usbHyperVSocketProbeFailureCount,
+                            UsbHyperVProbeFailureThresholdBeforeRestart - 1);
+
+                        UpdateUsbDiagnosticsPanel();
+                        continue;
+                    }
+
                     if (HasRecentHyperVDataPathSuccess())
                     {
                         _usbHyperVSocketProbeFailureCount = 0;
@@ -4656,6 +4684,11 @@ public sealed partial class App : Application
                 break;
             }
         }
+    }
+
+    private bool HasLocalAttachedUsbDevices()
+    {
+        return _usbDevices.Any(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId));
     }
 
     private async Task<bool> ProbeHyperVSocketServiceAsync(CancellationToken cancellationToken)

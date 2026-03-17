@@ -1881,6 +1881,12 @@ public partial class MainViewModel : ViewModelBase
             {
                 devices = await _usbIpService.GetDevicesAsync(token);
 
+                var staleDetachedCount = await TryDetachStaleDisconnectedAttachmentsAsync(devices, token);
+                if (staleDetachedCount > 0)
+                {
+                    devices = await _usbIpService.GetDevicesAsync(token);
+                }
+
                 var canApplyAutoShareNow = applyAutoShare;
 
                 var autoShareCandidates = canApplyAutoShareNow
@@ -2145,6 +2151,57 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return releasedCount;
+    }
+
+    private async Task<int> TryDetachStaleDisconnectedAttachmentsAsync(IReadOnlyList<UsbIpDeviceInfo> devices, CancellationToken token)
+    {
+        if (devices.Count == 0)
+        {
+            return 0;
+        }
+
+        var staleAttachedDevices = devices
+            .Where(device => device.IsAttached
+                             && !device.IsConnected
+                             && !string.IsNullOrWhiteSpace(device.BusId))
+            .ToList();
+
+        if (staleAttachedDevices.Count == 0)
+        {
+            return 0;
+        }
+
+        var detachedCount = 0;
+        foreach (var device in staleAttachedDevices)
+        {
+            var busId = device.BusId.Trim();
+            try
+            {
+                await _usbIpService.DetachAsync(busId, token);
+                detachedCount++;
+            }
+            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+            {
+                return detachedCount;
+            }
+            catch (Exception ex) when (IsUsbDetachNoOpError(ex))
+            {
+                detachedCount++;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "USB stale-attach cleanup detach failed. BusId={BusId}", busId);
+            }
+        }
+
+        if (detachedCount > 0)
+        {
+            Log.Information(
+                "Detached stale USB attachments for physically disconnected devices. Count={Count}",
+                detachedCount);
+        }
+
+        return detachedCount;
     }
 
     private static int GetUsbStatusSortRank(UsbIpDeviceInfo device)
@@ -4949,27 +5006,27 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        if (_usbAutoDetachGracePeriod > TimeSpan.Zero)
+        {
+            var recoveredDuringGrace = await WaitForUsbDisconnectRecoveryAsync(
+                normalizedBusId,
+                _usbAutoDetachGracePeriod,
+                _lifetimeCancellation.Token);
+
+            if (recoveredDuringGrace)
+            {
+                Log.Information(
+                    "USB auto-detach skipped after guest disconnect because fresh reconnect activity was detected during grace period. BusId={BusId}",
+                    normalizedBusId);
+                return;
+            }
+        }
+
         var gateEntered = false;
         try
         {
             await _usbTrayRefreshGate.WaitAsync(_lifetimeCancellation.Token);
             gateEntered = true;
-
-            if (_usbAutoDetachGracePeriod > TimeSpan.Zero)
-            {
-                var recoveredDuringGrace = await WaitForUsbDisconnectRecoveryAsync(
-                    normalizedBusId,
-                    _usbAutoDetachGracePeriod,
-                    _lifetimeCancellation.Token);
-
-                if (recoveredDuringGrace)
-                {
-                    Log.Information(
-                        "USB auto-detach skipped after guest disconnect because fresh reconnect activity was detected during grace period. BusId={BusId}",
-                        normalizedBusId);
-                    return;
-                }
-            }
 
             var detached = await TryDetachBusWithRetryAsync(
                 normalizedBusId,
@@ -5060,6 +5117,7 @@ public partial class MainViewModel : ViewModelBase
     {
         var text = ex.ToString();
         return text.Contains("Device not found by bus id", StringComparison.OrdinalIgnoreCase)
+               || text.Contains("There is no device with busid", StringComparison.OrdinalIgnoreCase)
                || text.Contains("not found", StringComparison.OrdinalIgnoreCase)
                || text.Contains("already detached", StringComparison.OrdinalIgnoreCase)
                || text.Contains("is not attached", StringComparison.OrdinalIgnoreCase)

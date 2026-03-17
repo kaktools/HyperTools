@@ -18,6 +18,9 @@
 	- Zyklische Guest-ACK-/Liveness-basierte Auto-Detach-Heuristiken wurden entfernt.
 	- Auto-Detach ist auf explizite Trigger beschränkt (`usb-disconnected` oder VM-ID nicht Running >= 10s).
 	- Bei `usb-disconnected` wartet der Host jetzt nicht nur die Grace-Phase ab, sondern prüft währenddessen aktiv auf frische Reconnect-/Heartbeat-Aktivität und überspringt den Detach, wenn sich der Guest stabil zurückmeldet.
+	- Während dieser Grace-Phase blockiert der Disconnect-Pfad die regulären USB-Refreshes nicht mehr; Host-Listenaktualisierung bei physischem Rein/Raus bleibt dadurch reaktiv.
+	- Geräte, die physisch am Host entfernt wurden (z. B. abgezogen), aber im Status noch als `Attached` ohne `Connected` auftauchen, werden beim Refresh automatisch detacht, damit kein Hängezustand bestehen bleibt.
+	- Multi-VM-Stabilität: `usb-disconnected` für ein Gerät löscht nicht mehr die `Connected By`-Zuordnung eines anderen Geräts mit gleichem Hardware-Profil; Ack-Identity priorisiert dafür `busid` vor `hardware`.
 	- Bei fehlgeschlagenem Auto-Detach bleibt der manuelle Weg (`Detach`/`Unshare`) als kontrollierter Fallback erhalten.
 	- Für diese Trigger nutzt der Host wieder konfigurierbare Retry/Grace/Delay-Werte (`usb.autoDetachRetryAttempts`, `usb.autoDetachGracePeriodSeconds`, `usb.autoDetachRetryDelayMs`).
 - Host USB UX:
@@ -32,6 +35,10 @@
 - Snapshot-Beschreibungen gingen nach Reload/Neustart verloren, obwohl der Snapshot selbst vorhanden war.
 - USB-Stale-Recovery reagierte in Grenzfällen zu aggressiv durch zyklische Liveness-Logik; die Detach-Entscheidung folgt jetzt nur noch den klar definierten Triggern.
 - Verzögerte Host-Detachs nach kurzzeitigen USB-Transportabbrüchen konnten trotz schneller Guest-Recovery weiterlaufen; Reconnect-/Heartbeat-Recovery während der Grace-Phase bricht den Auto-Detach jetzt sauber ab.
+- Physisch entfernte Host-USB-Geräte konnten in Einzelfällen als `Attached` hängen bleiben; der Host detacht diesen stale Zustand jetzt automatisch beim USB-Refresh.
+- In Multi-VM-Szenarien konnte `Connected By` auf einem weiterhin attached Gerät verloren gehen, wenn ein anderes Gerät disconnected wurde; die Key-/Cleanup-Logik trennt diese Fälle jetzt korrekt.
+- Guest Share-Liste markiert Geräte mit vorhandenem Host-Attachment-Hinweis nun weiterhin als `Busy` (statt `Available`), auch wenn `Connected By` kurzzeitig noch nicht aufgelöst werden kann.
+- `usbipd`-Detach-Fehler `There is no device with busid ...` wird als No-Op behandelt; dadurch keine unnötigen Warnketten mehr bei bereits verschwundenem BusId.
 - UAC-Anforderung für Host-Detach entfällt; Detach wird ohne zusätzliche Elevation ausgeführt.
 
 ### Doku
