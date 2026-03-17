@@ -2041,7 +2041,7 @@ internal sealed class GuestMainWindow : Window
 
         settingsStack.Children.Add(new TextBlock
         {
-            Text = "Shared-Folder läuft rein über Hyper-V Socket / HyperTool File Service (kein IP-Fallback).",
+            Text = "Shared-Folder nutzt WinFsp über Hyper-V Socket / HyperTool File Service.",
             Opacity = 0.72,
             TextWrapping = TextWrapping.Wrap
         });
