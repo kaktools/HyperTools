@@ -89,6 +89,7 @@ public sealed partial class App : Application
     private readonly Dictionary<string, CancellationTokenSource> _pendingUsbDisconnectDebounceByKey = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _lastHostUsbTunnelSelfHealAttemptUtc = DateTimeOffset.MinValue;
     private int _hostUsbTunnelSelfHealFailureCount;
+    private DateTimeOffset _suppressHostUsbTunnelSelfHealUntilUtc = DateTimeOffset.MinValue;
     private bool _hostHyperVMonitorEnabled;
     private CancellationTokenSource? _hostHyperVMonitorCts;
     private Task? _hostHyperVMonitorTask;
@@ -400,6 +401,13 @@ public sealed partial class App : Application
 
         window.Closed += async (_, _) =>
         {
+            // During window reopen the previous window can close after the new one
+            // is already active. Ignore stale close events so global services stay alive.
+            if (!ReferenceEquals(window, _mainWindow))
+            {
+                return;
+            }
+
             if (_isThemeWindowReopenInProgress)
             {
                 return;
@@ -411,29 +419,6 @@ public sealed partial class App : Application
             _trayControlCenterService = null;
             _trayService?.Dispose();
             _trayService = null;
-            StopUsbDiagnosticsLoop();
-            StopUsbHostDiscoveryResponder();
-            StopUsbAutoRefreshLoop();
-            StopHostHyperVMonitorLoop();
-            StopUsbEventRefreshScheduling();
-            _usbDiagnosticsHostListener?.Dispose();
-            _usbDiagnosticsHostListener = null;
-            _usbHostTunnel?.Dispose();
-            _usbHostTunnel = null;
-            _sharedFolderCatalogHostListener?.Dispose();
-            _sharedFolderCatalogHostListener = null;
-            _hostIdentityHostListener?.Dispose();
-            _hostIdentityHostListener = null;
-            _fileHostListener?.Dispose();
-            _fileHostListener = null;
-            StopResourceMonitorLoop();
-            _resourceMonitorHostListener?.Dispose();
-            _resourceMonitorHostListener = null;
-            _usbChangeNotificationHostListener?.Dispose();
-            _usbChangeNotificationHostListener = null;
-            _sharedFolderFileServiceSocketActive = false;
-            _sharedFolderFileServiceLastActivityUtc = null;
-            UpdateSharedFolderFileServiceStatusPanel();
             ShutdownSingleInstanceInfrastructure();
             Log.Information("HyperTool exited.");
             Log.CloseAndFlush();
@@ -451,6 +436,10 @@ public sealed partial class App : Application
         {
             return;
         }
+
+        _mainViewModel.SuppressVmOffUsbAutoDetach(TimeSpan.FromMinutes(4), "window-reopen-theme");
+        _mainViewModel.SuppressGuestDisconnectUsbAutoDetach(TimeSpan.FromMinutes(4), "window-reopen-theme");
+        ExtendHostUsbTunnelSelfHealSuppression(TimeSpan.FromMinutes(4), "window-reopen-theme");
 
         _isThemeWindowReopenInProgress = true;
         var previousWindow = _mainWindow;
@@ -478,29 +467,6 @@ public sealed partial class App : Application
             _trayControlCenterService = null;
             _trayService?.Dispose();
             _trayService = null;
-            StopUsbDiagnosticsLoop();
-            StopUsbHostDiscoveryResponder();
-            StopUsbAutoRefreshLoop();
-            StopHostHyperVMonitorLoop();
-            StopUsbEventRefreshScheduling();
-            _usbDiagnosticsHostListener?.Dispose();
-            _usbDiagnosticsHostListener = null;
-            _usbHostTunnel?.Dispose();
-            _usbHostTunnel = null;
-            _sharedFolderCatalogHostListener?.Dispose();
-            _sharedFolderCatalogHostListener = null;
-            _hostIdentityHostListener?.Dispose();
-            _hostIdentityHostListener = null;
-            _fileHostListener?.Dispose();
-            _fileHostListener = null;
-            StopResourceMonitorLoop();
-            _resourceMonitorHostListener?.Dispose();
-            _resourceMonitorHostListener = null;
-            _usbChangeNotificationHostListener?.Dispose();
-            _usbChangeNotificationHostListener = null;
-            _sharedFolderFileServiceSocketActive = false;
-            _sharedFolderFileServiceLastActivityUtc = null;
-            UpdateSharedFolderFileServiceStatusPanel();
 
             _themeService.ApplyTheme(_mainViewModel.UiTheme);
 
@@ -510,34 +476,9 @@ public sealed partial class App : Application
             _mainWindow = nextWindow;
 
             TryInitializeTray(nextWindow, _mainViewModel);
-
-            try
-            {
-                _usbHostTunnel = new HyperVSocketUsbHostTunnel();
-                _usbHostTunnel.Start();
-                Log.Information("Hyper-V socket USB host tunnel restarted after theme change.");
-
-                _usbDiagnosticsHostListener = new HyperVSocketDiagnosticsHostListener(ack => ProcessDiagnosticsAck(ack, isThemeRestart: true));
-                _usbDiagnosticsHostListener.Start();
-                Log.Information("Hyper-V socket diagnostics listener restarted after theme change.");
-            }
-            catch (Exception ex)
-            {
-                _usbDiagnosticsHostListener?.Dispose();
-                _usbDiagnosticsHostListener = null;
-                _usbHostTunnel?.Dispose();
-                _usbHostTunnel = null;
-                Log.Warning(ex, "Hyper-V socket services could not be restarted after theme change.");
-            }
-
-            StartSharedFolderCatalogListenerWithRecovery(isThemeRestart: true);
-            StartHostIdentityListenerWithRecovery(isThemeRestart: true);
-            StartFileHostListenerWithRecovery(isThemeRestart: true);
-            StartResourceMonitorListenerWithRecovery(isThemeRestart: true);
-            StartUsbChangeNotificationListenerWithRecovery(isThemeRestart: true);
-            StartResourceMonitorLoop();
+            // Keep host communication services running during window reopen.
+            // Restarting tunnel/listeners causes guest-attached devices to fall back to shared.
             _hostHyperVMonitorEnabled = _mainViewModel.UiDebugLoggingEnabled;
-            StartHostHyperVMonitorLoop();
 
             try
             {
@@ -603,11 +544,31 @@ public sealed partial class App : Application
             }
 
             _ = RefreshHostRuntimeStateAfterWindowReopenAsync();
+
+            _mainViewModel.SuppressVmOffUsbAutoDetach(TimeSpan.FromMinutes(3), "window-reopen-post-refresh");
+            _mainViewModel.SuppressGuestDisconnectUsbAutoDetach(TimeSpan.FromMinutes(3), "window-reopen-post-refresh");
+            ExtendHostUsbTunnelSelfHealSuppression(TimeSpan.FromMinutes(3), "window-reopen-post-refresh");
         }
         finally
         {
             _isThemeWindowReopenInProgress = false;
         }
+    }
+
+    private void ExtendHostUsbTunnelSelfHealSuppression(TimeSpan duration, string reason)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var untilUtc = now.Add(duration);
+        if (untilUtc <= _suppressHostUsbTunnelSelfHealUntilUtc)
+        {
+            return;
+        }
+
+        _suppressHostUsbTunnelSelfHealUntilUtc = untilUtc;
+        Log.Debug("Host USB Hyper-V tunnel self-heal suppression extended. Reason={Reason}; UntilUtc={UntilUtc}; DurationSeconds={DurationSeconds}",
+            reason,
+            untilUtc,
+            (int)Math.Max(0, duration.TotalSeconds));
     }
 
     private async Task RefreshHostRuntimeStateAfterWindowReopenAsync()
@@ -818,17 +779,12 @@ public sealed partial class App : Application
                 HideTrollOverlay();
                 RestoreMainWindowPosition(basePosition);
 
-                var reloaded = false;
                 try
                 {
-                    await ReopenMainWindowForThemeChangeAsync();
-                    reloaded = true;
+                    RestoreConfiguredThemeAfterRainbowMode();
+                    _mainWindow?.RebuildLayoutForCurrentTheme();
                 }
                 catch
-                {
-                }
-
-                if (!reloaded)
                 {
                     RestoreConfiguredThemeAfterRainbowMode();
                 }
@@ -2761,12 +2717,22 @@ public sealed partial class App : Application
             return;
         }
 
+        var now = DateTimeOffset.UtcNow;
+        if (now < _suppressHostUsbTunnelSelfHealUntilUtc)
+        {
+            return;
+        }
+
+        if (_mainViewModel?.UsbDevices.Any(device => device.IsAttached) == true)
+        {
+            return;
+        }
+
         if (_usbHostTunnel?.IsRunning == true)
         {
             return;
         }
 
-        var now = DateTimeOffset.UtcNow;
         if ((now - _lastHostUsbTunnelSelfHealAttemptUtc) < HostUsbTunnelSelfHealBackoff)
         {
             return;
@@ -3066,7 +3032,7 @@ public sealed partial class App : Application
         }
     }
 
-    public async Task RestartApplicationAsync(string? reason = null)
+    public async Task RestartApplicationAsync(string? reason = null, int restartDelaySeconds = 5)
     {
         if (_isRestartInProgress)
         {
@@ -3089,13 +3055,19 @@ public sealed partial class App : Application
                 return;
             }
 
-            Log.Information("Restarting HyperTool. Reason: {Reason}", reason ?? "Unknown");
+            restartDelaySeconds = Math.Clamp(restartDelaySeconds, 1, 30);
+            var escapedExecutablePath = executablePath.Replace("\"", "\"\"");
+            var restartArguments = $"/C timeout /T {restartDelaySeconds} /NOBREAK >NUL & start \"\" \"{escapedExecutablePath}\"";
+
+            Log.Information("Restarting HyperTool with delay. Reason: {Reason}; DelaySeconds={DelaySeconds}", reason ?? "Unknown", restartDelaySeconds);
 
             Process.Start(new ProcessStartInfo
             {
-                FileName = executablePath,
-                UseShellExecute = true,
-                WorkingDirectory = AppContext.BaseDirectory
+                FileName = "cmd.exe",
+                Arguments = restartArguments,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(executablePath) ?? AppContext.BaseDirectory
             });
 
             _isExitRequested = true;
@@ -3109,6 +3081,8 @@ public sealed partial class App : Application
             catch
             {
             }
+
+            await Task.Delay(250);
 
             Microsoft.UI.Xaml.Application.Current.Exit();
         }

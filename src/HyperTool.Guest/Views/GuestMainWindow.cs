@@ -3555,6 +3555,31 @@ internal sealed class GuestMainWindow : Window
         return await dialog.ShowAsync();
     }
 
+    private async Task<ContentDialogResult> ShowDisableAutoConnectAfterDisconnectPromptAsync(string deviceDescription)
+    {
+        if (Content is not FrameworkElement root || root.XamlRoot is null)
+        {
+            return ContentDialogResult.None;
+        }
+
+        var safeDeviceDescription = string.IsNullOrWhiteSpace(deviceDescription)
+            ? "dieses Gerät"
+            : deviceDescription.Trim();
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = root.XamlRoot,
+            Title = "Auto-Connect deaktivieren?",
+            Content = $"USB wurde getrennt ({safeDeviceDescription}). Soll Auto-Connect für dieses Gerät ebenfalls deaktiviert werden?",
+            PrimaryButtonText = "Deaktivieren",
+            SecondaryButtonText = "Behalten",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Secondary
+        };
+
+        return await dialog.ShowAsync();
+    }
+
     private async Task ShowUsbResetMigrationInfoIfPendingAsync()
     {
         if (_usbResetMigrationInfoShown || _config.Usb?.UsbConfigResetMigrationInfoPending != true)
@@ -4120,21 +4145,7 @@ internal sealed class GuestMainWindow : Window
     private void UpdateAutoConnectToggleFromSelection()
     {
         var selected = GetSelectedUsbDevice();
-        var keys = _config.Usb?.AutoConnectDeviceKeys ?? [];
-        var baseKey = selected is null ? string.Empty : BuildAutoConnectBaseKey(selected);
-        var specificKey = selected is null ? string.Empty : BuildAutoConnectSpecificKey(selected);
-        var hasAmbiguousBaseKey = selected is not null
-            && !string.IsNullOrWhiteSpace(baseKey)
-            && _usbDevices.Count(candidate =>
-                !string.IsNullOrWhiteSpace(candidate.BusId)
-                && string.Equals(BuildAutoConnectBaseKey(candidate), baseKey, StringComparison.OrdinalIgnoreCase)) > 1;
-        var hasKey = selected is not null
-            && !string.IsNullOrWhiteSpace(baseKey)
-            && (
-                (!string.IsNullOrWhiteSpace(specificKey)
-                    && keys.Contains(specificKey, StringComparer.OrdinalIgnoreCase))
-                || (!hasAmbiguousBaseKey
-                    && keys.Any(configuredKey => IsAutoConnectKeyMatch(configuredKey, baseKey))));
+        var hasKey = IsAutoConnectConfiguredForDevice(selected);
 
         _suppressUsbAutoConnectToggleEvents = true;
         try
@@ -4146,6 +4157,29 @@ internal sealed class GuestMainWindow : Window
         {
             _suppressUsbAutoConnectToggleEvents = false;
         }
+    }
+
+    private bool IsAutoConnectConfiguredForDevice(UsbIpDeviceInfo? selected)
+    {
+        if (selected is null)
+        {
+            return false;
+        }
+
+        var keys = _config.Usb?.AutoConnectDeviceKeys ?? [];
+        var baseKey = BuildAutoConnectBaseKey(selected);
+        var specificKey = BuildAutoConnectSpecificKey(selected);
+        var hasAmbiguousBaseKey = !string.IsNullOrWhiteSpace(baseKey)
+            && _usbDevices.Count(candidate =>
+                !string.IsNullOrWhiteSpace(candidate.BusId)
+                && string.Equals(BuildAutoConnectBaseKey(candidate), baseKey, StringComparison.OrdinalIgnoreCase)) > 1;
+
+        return !string.IsNullOrWhiteSpace(baseKey)
+            && (
+                (!string.IsNullOrWhiteSpace(specificKey)
+                    && keys.Contains(specificKey, StringComparer.OrdinalIgnoreCase))
+                || (!hasAmbiguousBaseKey
+                    && keys.Any(configuredKey => IsAutoConnectKeyMatch(configuredKey, baseKey))));
     }
 
     private async Task SetSelectedUsbDeviceAutoConnectAsync(bool enabled)
@@ -4424,6 +4458,21 @@ internal sealed class GuestMainWindow : Window
             return;
         }
 
+        var autoConnectWasEnabled = IsAutoConnectConfiguredForDevice(selected);
+        var disableAutoConnectAfterDisconnect = false;
+
+        if (autoConnectWasEnabled)
+        {
+            var decision = await ShowDisableAutoConnectAfterDisconnectPromptAsync(selected.Description);
+            if (decision == ContentDialogResult.None)
+            {
+                AppendNotification("[Info] USB-Disconnect abgebrochen.");
+                return;
+            }
+
+            disableAutoConnectAfterDisconnect = decision == ContentDialogResult.Primary;
+        }
+
         var code = await _disconnectUsbAsync(selected.BusId);
         AppendNotification(code == 0
             ? "[Info] USB Host-Detach erfolgreich."
@@ -4431,6 +4480,11 @@ internal sealed class GuestMainWindow : Window
 
         if (code == 0)
         {
+            if (autoConnectWasEnabled && disableAutoConnectAfterDisconnect)
+            {
+                await SetSelectedUsbDeviceAutoConnectAsync(false);
+            }
+
             AppendNotification("[Info] Aktualisiere USB-Liste in 3 Sekunden …");
             await Task.Delay(TimeSpan.FromSeconds(3));
         }

@@ -174,6 +174,8 @@ public sealed partial class App : Application
     private readonly ConcurrentQueue<DateTimeOffset> _configSaveTimestampsUtc = new();
     private DateTimeOffset? _usbRefreshSuccessLastLoggedUtc;
     private string _usbRefreshSuccessLastStateKey = string.Empty;
+    private DateTimeOffset _suppressAutoUsbDisconnectSignalsUntilUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _suppressUsbListClearingUntilUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastUsbBackgroundRefreshAttemptUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastHostIdentityBackgroundAttemptUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastUsbPushRefreshTriggeredUtc = DateTimeOffset.MinValue;
@@ -394,6 +396,8 @@ public sealed partial class App : Application
     {
         _rainbowPrincessModeCts?.Cancel();
         _trollModeCts?.Cancel();
+        ExtendAutoUsbDisconnectSignalSuppression(TimeSpan.FromSeconds(90), "troll-mode");
+        ExtendUsbListClearingSuppression(TimeSpan.FromSeconds(120), "troll-mode");
 
         var cts = new CancellationTokenSource();
         _trollModeCts = cts;
@@ -465,7 +469,35 @@ public sealed partial class App : Application
                 {
                     RestoreConfiguredThemeAfterRainbowMode();
                 }
+
+                SafeFireAndForget.Run(
+                    SchedulePostTrollUsbRefreshAsync(),
+                    operation: "usb-refresh-post-troll-mode");
             }
+        }
+    }
+
+    private async Task SchedulePostTrollUsbRefreshAsync()
+    {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(900));
+            await RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
+
+            await Task.Delay(TimeSpan.FromMilliseconds(1300));
+            await RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
+        }
+        catch (Exception ex)
+        {
+            GuestLogger.Debug("usb.refresh.post_troll.failed", ex.Message, new
+            {
+                exceptionType = ex.GetType().FullName
+            });
         }
     }
 
@@ -1352,6 +1384,9 @@ public sealed partial class App : Application
                 DiscoverUsbHostAddressAsync,
                 FetchHostSharedFoldersAsync,
                 _isUsbClientAvailable);
+            // Keep UI and app state in sync when a window is newly created and
+            // the in-memory USB list is already populated.
+            UpdateUsbViews();
             _mainWindow.UpdateHostFeatureAvailability(
                 usbFeatureEnabledByHost: _config.Usb?.HostFeatureEnabled != false,
                 sharedFoldersFeatureEnabledByHost: _config.SharedFolders?.HostFeatureEnabled != false,
@@ -1698,6 +1733,8 @@ public sealed partial class App : Application
             return;
         }
 
+        ExtendUsbListClearingSuppression(TimeSpan.FromSeconds(120), "theme-reopen");
+
         _isThemeWindowReopenInProgress = true;
         var previousWindow = _mainWindow;
 
@@ -1781,6 +1818,9 @@ public sealed partial class App : Application
             _minimizeToTray = _config.Ui.MinimizeToTray;
             _mainWindow.ApplyTheme(_config.Ui.Theme);
             _mainWindow.SelectMenuIndex(previousMenuIndex);
+            // Push current USB data into the new window before refresh logic,
+            // because refresh may short-circuit when list content is unchanged.
+            UpdateUsbViews();
 
             TryInitializeTray();
             await RefreshUsbDevicesAsync();
@@ -1862,6 +1902,10 @@ public sealed partial class App : Application
             UpdateTrayControlCenterView();
             UpdateUsbDiagnosticsPanel();
             UpdateSharedFolderReconnectStatusPanel();
+
+            SafeFireAndForget.Run(
+                SchedulePostThemeReopenUsbRefreshAsync(),
+                operation: "usb-refresh-post-theme-reopen");
         }
         catch (Exception ex)
         {
@@ -2228,6 +2272,11 @@ public sealed partial class App : Application
 
         try
         {
+        if (emitLogs)
+        {
+            ExtendAutoUsbDisconnectSignalSuppression(TimeSpan.FromSeconds(30), "interactive-usb-refresh");
+        }
+
         await RefreshUsbClientAvailabilityAsync();
 
         if (emitLogs)
@@ -2262,6 +2311,19 @@ public sealed partial class App : Application
 
         if (useHyperVSocket && _config?.Usb?.HostFeatureEnabled == false)
         {
+            if (_usbDevices.Count > 0
+                && IsUsbListClearingSuppressed(out var remainingSuppressionSeconds, out var suppressionReason))
+            {
+                GuestLogger.Debug("usb.refresh.blocked_host_policy.deferred_clear", "USB-Liste wird trotz Host-Policy=off temporär beibehalten (Übergangsfenster).", new
+                {
+                    remainingSuppressionSeconds,
+                    suppressionReason,
+                    currentCount = _usbDevices.Count
+                });
+
+                return _usbDevices;
+            }
+
             if (_usbDevices.Count > 0)
             {
                 _usbDevices.Clear();
@@ -2278,6 +2340,19 @@ public sealed partial class App : Application
 
         if (!_isUsbClientAvailable)
         {
+            if (_usbDevices.Count > 0
+                && IsUsbListClearingSuppressed(out var remainingSuppressionSeconds, out var suppressionReason))
+            {
+                GuestLogger.Debug("usb.refresh.client_missing.deferred_clear", "USB-Liste wird trotz fehlendem USB-Client temporär beibehalten (Übergangsfenster).", new
+                {
+                    remainingSuppressionSeconds,
+                    suppressionReason,
+                    currentCount = _usbDevices.Count
+                });
+
+                return _usbDevices;
+            }
+
             if (_usbDevices.Count > 0)
             {
                 _usbDevices.Clear();
@@ -2462,6 +2537,35 @@ public sealed partial class App : Application
                 ApplyHostUsbMetadata(device);
             }
 
+            var transientRemoteListGap = useRemoteHostList
+                && previouslyAttachedBusIds.Count > 0
+                && list.Count == 0;
+
+            if (transientRemoteListGap)
+            {
+                GuestLogger.Warn("usb.refresh.transient_remote_gap", "Host lieferte temporär eine leere USB-Liste bei zuvor attached Geräten. Bestehende Liste wird beibehalten und Recheck geplant.", new
+                {
+                    operationId,
+                    attachedCountBefore = previouslyAttachedBusIds.Count,
+                    hostAddress = hostResolution.ResolvedIpv4,
+                    hostSource = hostResolution.Source
+                });
+
+                SafeFireAndForget.Run(Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(1100));
+                        await RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
+                    }
+                    catch
+                    {
+                    }
+                }), operation: "usb-refresh-recheck-after-transient-gap");
+
+                return _usbDevices;
+            }
+
             if (previouslyAttachedBusIds.Count > 0)
             {
                 var currentlyAttachedBusIds = list
@@ -2633,8 +2737,13 @@ public sealed partial class App : Application
                 || !string.Equals(left.HardwareId, right.HardwareId, StringComparison.Ordinal)
                 || !string.Equals(left.InstanceId, right.InstanceId, StringComparison.Ordinal)
                 || !string.Equals(left.PersistedGuid, right.PersistedGuid, StringComparison.OrdinalIgnoreCase)
+                || left.IsConnected != right.IsConnected
+                || left.IsShared != right.IsShared
+                || left.IsAttached != right.IsAttached
+                || left.IsAttachedByOtherGuest != right.IsAttachedByOtherGuest
                 || !string.Equals(left.ClientIpAddress, right.ClientIpAddress, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(left.AttachedGuestComputerName, right.AttachedGuestComputerName, StringComparison.Ordinal)
+                || !string.Equals(left.StateText, right.StateText, StringComparison.Ordinal)
                 || !string.Equals(left.CustomName, right.CustomName, StringComparison.Ordinal)
                 || !string.Equals(left.CustomComment, right.CustomComment, StringComparison.Ordinal))
             {
@@ -2689,6 +2798,22 @@ public sealed partial class App : Application
         UsbHostResolution hostResolution,
         bool fallbackToIpUsed)
     {
+        if (IsAutoUsbDisconnectSignalSuppressed(out var suppressionRemainingSeconds, out var reason))
+        {
+            if (lostAttachedBusIds.Count > 0)
+            {
+                GuestLogger.Debug("usb.refresh.local_detach_suppressed_window", "Automatisches usb-disconnected temporär unterdrückt (Schutzfenster).", new
+                {
+                    operationId,
+                    reason,
+                    remainingSuppressionSeconds = suppressionRemainingSeconds,
+                    candidateCount = lostAttachedBusIds.Count
+                });
+            }
+
+            return;
+        }
+
         var now = DateTimeOffset.UtcNow;
         var confirmedDetachBusIds = new List<string>();
         var analyzedBusIds = new List<string>();
@@ -3103,6 +3228,18 @@ public sealed partial class App : Application
             return;
         }
 
+        if (IsAutoUsbDisconnectSignalSuppressed(out var suppressionRemainingSeconds, out var reason))
+        {
+            GuestLogger.Debug("usb.connect.already_exported.recovery_signal_suppressed_window", "Stale-Export-Recovery-Signal temporär unterdrückt (Schutzfenster).", new
+            {
+                operationId,
+                busId = normalizedBusId,
+                reason,
+                remainingSuppressionSeconds = suppressionRemainingSeconds
+            });
+            return;
+        }
+
         if (IsAutoDisconnectSuppressedAfterAttach(normalizedBusId, out var remainingSeconds))
         {
             GuestLogger.Debug("usb.connect.already_exported.recovery_signal_suppressed_recent_attach", "Stale-Export-Recovery unterdrückt, da Gerät frisch attached wurde.", new
@@ -3342,6 +3479,104 @@ public sealed partial class App : Application
 
         remainingSeconds = (int)Math.Ceiling((suppressionWindow - elapsed).TotalSeconds);
         return true;
+    }
+
+    private void ExtendAutoUsbDisconnectSignalSuppression(TimeSpan duration, string reason)
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var untilUtc = DateTimeOffset.UtcNow.Add(duration);
+        if (untilUtc > _suppressAutoUsbDisconnectSignalsUntilUtc)
+        {
+            _suppressAutoUsbDisconnectSignalsUntilUtc = untilUtc;
+        }
+
+        GuestLogger.Debug("usb.auto_disconnect.suppression.extend", "Schutzfenster für automatische usb-disconnected Signale verlängert.", new
+        {
+            reason,
+            untilUtc = _suppressAutoUsbDisconnectSignalsUntilUtc,
+            durationSeconds = (int)Math.Max(1, Math.Round(duration.TotalSeconds))
+        });
+    }
+
+    private bool IsAutoUsbDisconnectSignalSuppressed(out int remainingSeconds, out string reason)
+    {
+        reason = string.Empty;
+        remainingSeconds = 0;
+
+        var remaining = _suppressAutoUsbDisconnectSignalsUntilUtc - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        reason = "transient-protection-window";
+        remainingSeconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        return true;
+    }
+
+    private void ExtendUsbListClearingSuppression(TimeSpan duration, string reason)
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var untilUtc = DateTimeOffset.UtcNow.Add(duration);
+        if (untilUtc > _suppressUsbListClearingUntilUtc)
+        {
+            _suppressUsbListClearingUntilUtc = untilUtc;
+        }
+
+        GuestLogger.Debug("usb.refresh.list_clear_suppression.extend", "Schutzfenster zum Erhalt der USB-Liste verlängert.", new
+        {
+            reason,
+            untilUtc = _suppressUsbListClearingUntilUtc,
+            durationSeconds = (int)Math.Max(1, Math.Round(duration.TotalSeconds))
+        });
+    }
+
+    private bool IsUsbListClearingSuppressed(out int remainingSeconds, out string reason)
+    {
+        reason = string.Empty;
+        remainingSeconds = 0;
+
+        var remaining = _suppressUsbListClearingUntilUtc - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        reason = "transient-reopen-window";
+        remainingSeconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        return true;
+    }
+
+    private async Task SchedulePostThemeReopenUsbRefreshAsync()
+    {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1100));
+            await RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
+
+            await Task.Delay(TimeSpan.FromMilliseconds(1500));
+            await RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
+        }
+        catch (Exception ex)
+        {
+            GuestLogger.Debug("usb.refresh.post_theme_reopen.failed", ex.Message, new
+            {
+                exceptionType = ex.GetType().FullName
+            });
+        }
     }
 
     private async Task<bool> ConfirmGuestLocalDetachAsync(string busId, CancellationToken cancellationToken)

@@ -26,12 +26,16 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan LoopbackManagedUsbAttachGraceFloor = TimeSpan.FromSeconds(180);
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestAckChannelHealthyWindow = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan VmOffDetachRecentGuestAckGracePeriod = TimeSpan.FromSeconds(75);
+    private static readonly TimeSpan VmOffDetachTransientSuppressionAfterReload = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan GuestDisconnectDetachTransientSuppressionAfterReload = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan VmAutoDetachDelayAfterVmStop = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan UsbStaleExportHintEscalationWindow = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan UsbDisconnectRecoveryProbeInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan UsbDisconnectRecoveryFreshnessWindow = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan VmOffDetachSuppressionLogInterval = TimeSpan.FromSeconds(30);
     private const int UsbStaleExportHintEscalationCount = 2;
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private const int LoopbackManagedUsbDetachRetryFloor = 20;
@@ -481,6 +485,10 @@ public partial class MainViewModel : ViewModelBase
     private double _hostCpuPercent;
     private double _hostRamUsedGb;
     private double _hostRamTotalGb;
+    private DateTimeOffset _suppressVmOffUsbAutoDetachUntilUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _suppressGuestDisconnectUsbAutoDetachUntilUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastVmOffDetachSuppressionLogUtc = DateTimeOffset.MinValue;
+    private int _suppressedVmOffDetachLogCount;
 
     private sealed class VmResourceMonitorRuntimeState
     {
@@ -2263,6 +2271,29 @@ public partial class MainViewModel : ViewModelBase
             return 0;
         }
 
+        var activeLoopbackBusIds = loopbackAttachedDevices
+            .Select(device => device.BusId.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var obsoleteBusId in _usbVmNotRunningSinceUtc.Keys.Where(key => !activeLoopbackBusIds.Contains(key)).ToList())
+        {
+            _usbVmNotRunningSinceUtc.Remove(obsoleteBusId);
+            _usbVmOffDetachManualRequiredBusIds.Remove(obsoleteBusId);
+        }
+
+        if (IsVmOffUsbAutoDetachSuppressed(out var suppressionRemainingSeconds))
+        {
+            foreach (var busId in activeLoopbackBusIds)
+            {
+                _usbVmNotRunningSinceUtc.Remove(busId);
+                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+            }
+
+            LogVmOffDetachSuppressionHeartbeat(activeLoopbackBusIds.Count, suppressionRemainingSeconds);
+
+            return 0;
+        }
+
         IReadOnlyList<HyperVVmInfo> runtimeVms;
         try
         {
@@ -2279,22 +2310,20 @@ public partial class MainViewModel : ViewModelBase
             .Select(vm => vm.VmId.Trim())
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var activeLoopbackBusIds = loopbackAttachedDevices
-            .Select(device => device.BusId.Trim())
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var obsoleteBusId in _usbVmNotRunningSinceUtc.Keys.Where(key => !activeLoopbackBusIds.Contains(key)).ToList())
-        {
-            _usbVmNotRunningSinceUtc.Remove(obsoleteBusId);
-            _usbVmOffDetachManualRequiredBusIds.Remove(obsoleteBusId);
-        }
-
         var now = DateTimeOffset.UtcNow;
         var detachedCount = 0;
 
         foreach (var device in loopbackAttachedDevices)
         {
             var busId = device.BusId.Trim();
+
+            if (UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, VmOffDetachRecentGuestAckGracePeriod, out _)
+                || UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, VmOffDetachRecentGuestAckGracePeriod, out _))
+            {
+                _usbVmNotRunningSinceUtc.Remove(busId);
+                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                continue;
+            }
 
             if (!UsbGuestConnectionRegistry.TryGetGuestVmId(busId, out var sourceVmId)
                 || string.IsNullOrWhiteSpace(sourceVmId))
@@ -2411,8 +2440,13 @@ public partial class MainViewModel : ViewModelBase
              && string.Equals(left.HardwareIdentityKey?.Trim(), right.HardwareIdentityKey?.Trim(), StringComparison.OrdinalIgnoreCase)
                && string.Equals(left.InstanceId?.Trim(), right.InstanceId?.Trim(), StringComparison.OrdinalIgnoreCase)
                && string.Equals(left.PersistedGuid?.Trim(), right.PersistedGuid?.Trim(), StringComparison.OrdinalIgnoreCase)
+                             && left.IsConnected == right.IsConnected
+                             && left.IsShared == right.IsShared
+                             && left.IsAttached == right.IsAttached
+                             && left.IsAttachedByOtherGuest == right.IsAttachedByOtherGuest
                && string.Equals(left.ClientIpAddress?.Trim(), right.ClientIpAddress?.Trim(), StringComparison.OrdinalIgnoreCase)
                && string.Equals(left.AttachedGuestComputerName?.Trim(), right.AttachedGuestComputerName?.Trim(), StringComparison.OrdinalIgnoreCase)
+                             && string.Equals(left.StateText?.Trim(), right.StateText?.Trim(), StringComparison.Ordinal)
                && string.Equals(left.DeviceIdentityKey?.Trim(), right.DeviceIdentityKey?.Trim(), StringComparison.OrdinalIgnoreCase)
                && string.Equals(left.CustomName?.Trim(), right.CustomName?.Trim(), StringComparison.Ordinal)
                && string.Equals(left.CustomComment?.Trim(), right.CustomComment?.Trim(), StringComparison.Ordinal);
@@ -3440,6 +3474,18 @@ public partial class MainViewModel : ViewModelBase
         SelectedVmForConfig = SelectedVm;
         SelectedDefaultVmForConfig = AvailableVms.FirstOrDefault(vm => string.Equals(vm.Name, defaultName, StringComparison.OrdinalIgnoreCase))
                                    ?? SelectedVm;
+
+        if (SelectedVm is null)
+        {
+            SelectedVmState = "Unbekannt";
+            SelectedVmCurrentSwitch = NotConnectedSwitchDisplay;
+        }
+        else
+        {
+            SelectedVmState = string.IsNullOrWhiteSpace(SelectedVm.RuntimeState) ? "Unbekannt" : SelectedVm.RuntimeState;
+            SelectedVmCurrentSwitch = NormalizeSwitchDisplayName(SelectedVm.RuntimeSwitchName);
+        }
+
         NotifyTrayStateChanged();
     }
 
@@ -5005,6 +5051,15 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        if (IsGuestDisconnectUsbAutoDetachSuppressed(out var suppressionRemainingSeconds))
+        {
+            Log.Debug(
+                "USB detach after guest disconnect skipped due transient suppression window. BusId={BusId}; RemainingSeconds={RemainingSeconds}",
+                normalizedBusId,
+                suppressionRemainingSeconds);
+            return;
+        }
+
         var gateEntered = false;
         try
         {
@@ -6242,6 +6297,9 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task ReloadConfigAsync()
     {
+        SuppressVmOffUsbAutoDetach(VmOffDetachTransientSuppressionAfterReload, "reload-config");
+        SuppressGuestDisconnectUsbAutoDetach(GuestDisconnectDetachTransientSuppressionAfterReload, "reload-config");
+
         await ExecuteBusyActionAsync("Konfiguration wird neu geladen...", _ =>
         {
             var configResult = _configService.LoadOrCreate(_configPath);
@@ -6339,8 +6397,95 @@ public partial class MainViewModel : ViewModelBase
 
         await LoadVmsFromHyperVAsync();
         await RefreshSwitchesAsync();
+        await RefreshUsbDevicesFromTrayAsync();
         NotifyTrayStateChanged();
         MarkConfigClean();
+    }
+
+    public void SuppressVmOffUsbAutoDetach(TimeSpan duration, string reason = "manual")
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var untilUtc = DateTimeOffset.UtcNow.Add(duration);
+        if (untilUtc > _suppressVmOffUsbAutoDetachUntilUtc)
+        {
+            _suppressVmOffUsbAutoDetachUntilUtc = untilUtc;
+        }
+
+        Log.Debug(
+            "VM-off USB auto-detach suppression extended. Reason={Reason}; UntilUtc={UntilUtc}; DurationSeconds={DurationSeconds}",
+            reason,
+            _suppressVmOffUsbAutoDetachUntilUtc,
+            (int)Math.Max(1, Math.Round(duration.TotalSeconds)));
+    }
+
+    private bool IsVmOffUsbAutoDetachSuppressed(out int remainingSeconds)
+    {
+        var remaining = _suppressVmOffUsbAutoDetachUntilUtc - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+        {
+            remainingSeconds = 0;
+            return false;
+        }
+
+        remainingSeconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        return true;
+    }
+
+    private void LogVmOffDetachSuppressionHeartbeat(int activeLoopbackCount, int remainingSeconds)
+    {
+        var now = DateTimeOffset.UtcNow;
+        _suppressedVmOffDetachLogCount++;
+
+        if ((now - _lastVmOffDetachSuppressionLogUtc) < VmOffDetachSuppressionLogInterval)
+        {
+            return;
+        }
+
+        Log.Debug(
+            "VM-off USB auto-detach temporarily suppressed. ActiveLoopbackCount={Count}; RemainingSeconds={RemainingSeconds}; SuppressedLogCount={SuppressedLogCount}",
+            activeLoopbackCount,
+            remainingSeconds,
+            Math.Max(0, _suppressedVmOffDetachLogCount - 1));
+
+        _lastVmOffDetachSuppressionLogUtc = now;
+        _suppressedVmOffDetachLogCount = 0;
+    }
+
+    public void SuppressGuestDisconnectUsbAutoDetach(TimeSpan duration, string reason = "manual")
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var untilUtc = DateTimeOffset.UtcNow.Add(duration);
+        if (untilUtc > _suppressGuestDisconnectUsbAutoDetachUntilUtc)
+        {
+            _suppressGuestDisconnectUsbAutoDetachUntilUtc = untilUtc;
+        }
+
+        Log.Debug(
+            "Guest-disconnect USB auto-detach suppression extended. Reason={Reason}; UntilUtc={UntilUtc}; DurationSeconds={DurationSeconds}",
+            reason,
+            _suppressGuestDisconnectUsbAutoDetachUntilUtc,
+            (int)Math.Max(1, Math.Round(duration.TotalSeconds)));
+    }
+
+    private bool IsGuestDisconnectUsbAutoDetachSuppressed(out int remainingSeconds)
+    {
+        var remaining = _suppressGuestDisconnectUsbAutoDetachUntilUtc - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+        {
+            remainingSeconds = 0;
+            return false;
+        }
+
+        remainingSeconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        return true;
     }
 
     private void ApplyConfiguredVmDefinitions(IEnumerable<VmDefinition>? configuredVms)

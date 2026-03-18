@@ -4819,6 +4819,9 @@ public sealed class MainWindow : Window
         _isPerformanceDiscoRunning = true;
         try
         {
+            _viewModel.SuppressVmOffUsbAutoDetach(TimeSpan.FromMinutes(4), "disco-mode");
+            _viewModel.SuppressGuestDisconnectUsbAutoDetach(TimeSpan.FromMinutes(4), "disco-mode");
+
             try
             {
                 _resourceMonitorWindow?.Close();
@@ -4843,6 +4846,11 @@ public sealed class MainWindow : Window
             StopPerformanceDiscoVisuals();
 
             await _viewModel.ReloadConfigCommand.ExecuteAsync(null);
+            _viewModel.SuppressVmOffUsbAutoDetach(TimeSpan.FromMinutes(3), "disco-post-reload");
+            _viewModel.SuppressGuestDisconnectUsbAutoDetach(TimeSpan.FromMinutes(3), "disco-post-reload");
+            await _viewModel.RefreshUsbDevicesFromTrayAsync();
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            await _viewModel.RefreshUsbDevicesFromTrayAsync();
             _viewModel.PublishNotification("Disco-Modus beendet. Tool wurde neu geladen.", "Success");
         }
         catch (Exception ex)
@@ -6382,7 +6390,7 @@ public sealed class MainWindow : Window
 
             if (_themeTransitionStatusText is not null)
             {
-                _themeTransitionStatusText.Text = "Tool wird neu gestartet …";
+                _themeTransitionStatusText.Text = "Tool wird in 5 Sekunden neu gestartet …";
             }
 
             await Task.Delay(900);
@@ -6393,8 +6401,8 @@ public sealed class MainWindow : Window
                 return;
             }
 
-            _viewModel.PublishNotification("Tool wird neu gestartet …", "Info");
-            await app.ReopenMainWindowForThemeChangeAsync();
+            _viewModel.PublishNotification("Tool wird vollständig beendet und in 5 Sekunden neu gestartet …", "Info");
+            await app.RestartApplicationAsync(reason: "manual-tool-restart-button", restartDelaySeconds: 5);
         }
         catch (Exception ex)
         {
@@ -6573,6 +6581,13 @@ public sealed class MainWindow : Window
         RefreshVmAdapterCards();
     }
 
+    public void RebuildLayoutForCurrentTheme()
+    {
+        _themeService.ApplyTheme(_viewModel.UiTheme);
+        RebuildMainLayoutForTheme();
+        _isMainLayoutLoaded = true;
+    }
+
     private async Task RestartForThemeChangeAsync()
     {
         if (_isThemeRestartInProgress)
@@ -6599,7 +6614,7 @@ public sealed class MainWindow : Window
                 _themeTransitionStatusText.Text = "Design wird neu geladen …";
             }
 
-            await Task.Delay(1000);
+            await Task.Delay(650);
 
             if (Application.Current is App app)
             {

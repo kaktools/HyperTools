@@ -4,7 +4,13 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.5.7**
+- Version: **v2.5.8**
+- Host-USB-Auto-Detach ist bei VM-/USB-Refresh jetzt deutlich konservativer: frische Guest-Heartbeats/Acks verhindern ungewollte Detachs.
+- Guest-USB bleibt bei Host-VM-Refresh und Host-USB-Refresh stabil attached, statt durch transiente Statuswechsel getrennt zu werden.
+- Troll-/Disco-Phasen verursachen keine ungewollten USB-Disconnect-Kaskaden mehr zwischen Guest und Host.
+- Guest unterdrückt automatische `usb-disconnected`-Signale temporär bei interaktivem USB-Refresh und im Troll-Mode (Schutzfenster).
+- VM-Status-Chip im Host aktualisiert sich nach Shutdown wieder korrekt ohne manuelles Neu-Auswählen/Refresh.
+- Guest zeigt beim manuellen USB-Disconnect mit aktivem Auto-Connect jetzt eine Nachfrage, ob Auto-Connect ebenfalls deaktiviert werden soll.
 - Snapshot-Beschreibungen bleiben nach Reload/Neustart erhalten (persistente Override-Speicherung im Host).
 - Host-USB-Auto-Detach nutzt jetzt eine klare Trigger-Policy: nur bei Guest-Disconnect oder wenn die zugehörige VM-ID mindestens 10 Sekunden nicht läuft.
 - In der Host-USB-Leiste gibt es einen dedizierten `Detach`-Button direkt neben `Share` und `Unshare`.

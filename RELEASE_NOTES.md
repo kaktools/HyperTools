@@ -1,5 +1,47 @@
 # HyperTool Release Notes
 
+## v2.5.8
+
+### Highlights
+
+- USB-Stabilität zwischen Host und Guest wurde für Refresh-/Mode-Übergänge gezielt gehärtet.
+- Ungewollte Auto-Detach-Kaskaden bei transienten Zuständen (VM-Refresh, USB-Refresh, Troll/Disco) wurden deutlich reduziert.
+- Host-VM-Statusanzeige bleibt nach Shutdown nicht mehr fälschlich auf `Running` stehen.
+- Guest-UX beim manuellen USB-Disconnect wurde erweitert: Auto-Connect kann direkt mit deaktiviert werden.
+
+### Verbessert
+
+- Host USB Auto-Detach:
+	- VM-off-Detach berücksichtigt jetzt frische Guest-Heartbeats/Acks als Schutzsignal und detach’t in diesem Zeitfenster nicht aggressiv.
+	- Dadurch bleiben Guest-Attachments bei Host-VM-Refresh und Host-USB-Refresh stabiler bestehen.
+	- Schutz greift auch in intensiven UI-/Mode-Übergängen (z. B. Disco/Troll), in denen Runtime-States kurzzeitig schwanken können.
+- Guest USB Signalpfad:
+	- Automatische `usb-disconnected`-Signale werden in einem temporären Schutzfenster unterdrückt, wenn ein interaktiver USB-Refresh läuft.
+	- Gleiches Schutzfenster greift beim Guest-Troll-Mode, um keine unnötigen Host-Detach-Folgen auszulösen.
+	- Stale-Export-Disconnect-Signalisierung respektiert dieses Schutzfenster ebenfalls.
+- Guest UI/Bedienung:
+	- Nach erfolgreichem manuellem USB-Disconnect mit aktivem Auto-Connect erscheint ein Dialog:
+		- `Auto-Connect deaktivieren`
+		- `Behalten`
+		- `Abbrechen`
+	- Damit lässt sich das bisherige "direkt wieder verbinden" gezielt vermeiden.
+- Host VM-Status-Sync:
+	- Nach Runtime-Listen-Rebuild werden `SelectedVmState` und aktueller Switch-Status explizit synchronisiert.
+	- Status-Chips zeigen dadurch den tatsächlichen Zustand sofort korrekt an.
+
+### Behoben
+
+- Guest-USB konnte bei Host-VM-Refresh ungewollt detacht werden.
+- Guest-USB konnte bei Host-USB-Refresh ungewollt detacht werden.
+- Troll-/Disco-Modi konnten indirekt USB-Disconnect/Detach-Ketten auslösen.
+- Guest-seitiger Troll-Mode oder USB-Refresh konnte fälschlich ein `usb-disconnected` in Richtung Host triggern.
+- Host-Statuschip blieb nach einfachem VM-Shutdown bis zum manuellen Refresh auf `Running`.
+- Beim Guest-Disconnect fehlte eine direkte Entscheidungshilfe für gleichzeitiges Auto-Connect-Disable.
+
+### Doku
+
+- README auf `v2.5.8` aktualisiert (Release-Stand + USB/VM-Stabilitätsfixes + Guest-Disconnect-Dialog).
+
 ## v2.5.7
 
 ### Highlights
