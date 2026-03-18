@@ -203,6 +203,8 @@ public sealed class MainWindow : Window
     private MediaPlayer? _logoSpinPlayer;
     private DispatcherQueueTimer? _vmChipRefreshDebounceTimer;
     private DispatcherQueueTimer? _vmChipAutoRefreshTimer;
+    private DateTimeOffset _lastVmRuntimeAutoRefreshUtc = DateTimeOffset.MinValue;
+    private bool _vmRuntimeAutoRefreshInProgress;
     private string _vmChipRefreshSignature = string.Empty;
     private bool _suppressHostFeatureToggleEvents;
     private bool _suppressUsbSelectionEvents;
@@ -275,6 +277,7 @@ public sealed class MainWindow : Window
                     if (_isMainLayoutLoaded)
                     {
                         RequestVmChipsRefresh();
+                        _ = TryRefreshVmRuntimeStateInBackgroundAsync();
                     }
                 };
                 _vmChipAutoRefreshTimer.Start();
@@ -340,6 +343,37 @@ public sealed class MainWindow : Window
         _startupSplash = null;
         RequestVmChipsRefresh();
         RefreshVmAdapterCards();
+    }
+
+    private async Task TryRefreshVmRuntimeStateInBackgroundAsync()
+    {
+        if (_vmRuntimeAutoRefreshInProgress)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if ((now - _lastVmRuntimeAutoRefreshUtc) < TimeSpan.FromSeconds(5))
+        {
+            return;
+        }
+
+        _vmRuntimeAutoRefreshInProgress = true;
+
+        try
+        {
+            await _viewModel.RefreshVmRuntimeStatesFromTrayAsync();
+            _lastVmRuntimeAutoRefreshUtc = DateTimeOffset.UtcNow;
+            RequestVmChipsRefresh();
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Background VM runtime state refresh from main window failed.");
+        }
+        finally
+        {
+            _vmRuntimeAutoRefreshInProgress = false;
+        }
     }
 
     public void ForceDismissStartupSplash()

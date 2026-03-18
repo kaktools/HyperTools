@@ -23,15 +23,15 @@ public partial class MainViewModel : ViewModelBase
     private const uint KeyeventfExtendedKey = 0x0001;
     private const uint KeyeventfKeyUp = 0x0002;
     private static readonly TimeSpan DefaultStaleUsbAttachGracePeriod = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan LoopbackManagedUsbAttachGraceFloor = TimeSpan.FromSeconds(180);
+    private static readonly TimeSpan LoopbackManagedUsbAttachGraceFloor = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestAckChannelHealthyWindow = TimeSpan.FromMinutes(2);
-    private static readonly TimeSpan VmOffDetachRecentGuestAckGracePeriod = TimeSpan.FromSeconds(75);
+    private static readonly TimeSpan VmOffDetachRecentGuestAckGracePeriod = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan VmOffDetachTransientSuppressionAfterReload = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan GuestDisconnectDetachTransientSuppressionAfterReload = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
-    private static readonly TimeSpan VmAutoDetachDelayAfterVmStop = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan VmAutoDetachDelayAfterVmStop = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan UsbStaleExportHintEscalationWindow = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan UsbDisconnectRecoveryProbeInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan UsbDisconnectRecoveryFreshnessWindow = TimeSpan.FromSeconds(15);
@@ -2255,6 +2255,8 @@ public partial class MainViewModel : ViewModelBase
         {
             _usbVmNotRunningSinceUtc.Clear();
             _usbVmOffDetachManualRequiredBusIds.Clear();
+            _usbAttachedWithoutAckSinceUtc.Clear();
+            _usbAttachedWithoutAckAttempts.Clear();
             return 0;
         }
 
@@ -2268,6 +2270,8 @@ public partial class MainViewModel : ViewModelBase
         {
             _usbVmNotRunningSinceUtc.Clear();
             _usbVmOffDetachManualRequiredBusIds.Clear();
+            _usbAttachedWithoutAckSinceUtc.Clear();
+            _usbAttachedWithoutAckAttempts.Clear();
             return 0;
         }
 
@@ -2281,12 +2285,22 @@ public partial class MainViewModel : ViewModelBase
             _usbVmOffDetachManualRequiredBusIds.Remove(obsoleteBusId);
         }
 
+        foreach (var obsoleteBusId in _usbAttachedWithoutAckSinceUtc.Keys.Where(key => !activeLoopbackBusIds.Contains(key)).ToList())
+        {
+            _usbAttachedWithoutAckSinceUtc.Remove(obsoleteBusId);
+            _usbAttachedWithoutAckAttempts.Remove(obsoleteBusId);
+            _usbForceDetachFallbackBusIds.Remove(obsoleteBusId);
+        }
+
         if (IsVmOffUsbAutoDetachSuppressed(out var suppressionRemainingSeconds))
         {
             foreach (var busId in activeLoopbackBusIds)
             {
                 _usbVmNotRunningSinceUtc.Remove(busId);
                 _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                _usbAttachedWithoutAckAttempts.Remove(busId);
+                _usbForceDetachFallbackBusIds.Remove(busId);
             }
 
             LogVmOffDetachSuppressionHeartbeat(activeLoopbackBusIds.Count, suppressionRemainingSeconds);
@@ -2309,6 +2323,10 @@ public partial class MainViewModel : ViewModelBase
             .Where(vm => IsRunningState(vm.State) && !string.IsNullOrWhiteSpace(vm.VmId))
             .Select(vm => vm.VmId.Trim())
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var runningVmNames = runtimeVms
+            .Where(vm => IsRunningState(vm.State) && !string.IsNullOrWhiteSpace(vm.Name))
+            .Select(vm => vm.Name.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var now = DateTimeOffset.UtcNow;
         var detachedCount = 0;
@@ -2317,19 +2335,199 @@ public partial class MainViewModel : ViewModelBase
         {
             var busId = device.BusId.Trim();
 
-            if (UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, VmOffDetachRecentGuestAckGracePeriod, out _)
-                || UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, VmOffDetachRecentGuestAckGracePeriod, out _))
+            var hasFreshGuestActivity = UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, VmOffDetachRecentGuestAckGracePeriod, out _)
+                || UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, VmOffDetachRecentGuestAckGracePeriod, out _);
+
+            if (hasFreshGuestActivity)
             {
                 _usbVmNotRunningSinceUtc.Remove(busId);
                 _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                _usbAttachedWithoutAckAttempts.Remove(busId);
+                _usbForceDetachFallbackBusIds.Remove(busId);
                 continue;
             }
 
-            if (!UsbGuestConnectionRegistry.TryGetGuestVmId(busId, out var sourceVmId)
-                || string.IsNullOrWhiteSpace(sourceVmId))
+            if (!_usbAttachedWithoutAckSinceUtc.TryGetValue(busId, out var withoutAckSinceUtc))
             {
-                _usbVmNotRunningSinceUtc.Remove(busId);
-                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                withoutAckSinceUtc = now;
+                _usbAttachedWithoutAckSinceUtc[busId] = withoutAckSinceUtc;
+            }
+
+            var withoutAckDuration = now - withoutAckSinceUtc;
+
+            var hasSourceVmId = UsbGuestConnectionRegistry.TryGetGuestVmId(busId, out var sourceVmId)
+                                && !string.IsNullOrWhiteSpace(sourceVmId);
+
+            if (!hasSourceVmId)
+            {
+                var attachedGuestName = (device.AttachedGuestComputerName ?? string.Empty).Trim();
+
+                if (!string.IsNullOrWhiteSpace(attachedGuestName)
+                    && runningVmNames.Contains(attachedGuestName))
+                {
+                    if (!_usbForceDetachFallbackBusIds.Contains(busId)
+                        && withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
+                    {
+                        try
+                        {
+                            var detached = await TryDetachBusWithRetryAsync(
+                                busId,
+                                initialDelay: TimeSpan.Zero,
+                                token,
+                                context: "loopback-no-guest-activity-running-vm");
+
+                            if (detached)
+                            {
+                                _usbVmNotRunningSinceUtc.Remove(busId);
+                                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                                _usbAttachedWithoutAckAttempts.Remove(busId);
+                                _usbForceDetachFallbackBusIds.Remove(busId);
+                                detachedCount++;
+
+                                Log.Information(
+                                    "USB auto-detach executed after missing guest activity for {GraceSeconds}s while VM still reports running. BusId={BusId}; AttachedGuestName={AttachedGuestName}",
+                                    (int)LoopbackManagedUsbAttachGraceFloor.TotalSeconds,
+                                    busId,
+                                    attachedGuestName);
+                                continue;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            var attempt = _usbAttachedWithoutAckAttempts.TryGetValue(busId, out var existingAttempt)
+                                ? existingAttempt + 1
+                                : 1;
+                            _usbAttachedWithoutAckAttempts[busId] = attempt;
+
+                            if (attempt >= 3)
+                            {
+                                _usbForceDetachFallbackBusIds.Add(busId);
+                            }
+
+                            Log.Warning(
+                                ex,
+                                "USB auto-detach after missing guest activity failed. BusId={BusId}; AttachedGuestName={AttachedGuestName}; Attempt={Attempt}",
+                                busId,
+                                attachedGuestName,
+                                attempt);
+                        }
+                    }
+
+                    _usbVmNotRunningSinceUtc.Remove(busId);
+                    _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                    continue;
+                }
+
+                // If at least one VM is running and no ownership mapping exists yet,
+                // avoid false-detach during short startup/reconnect windows.
+                if (runningVmNames.Count > 0 && string.IsNullOrWhiteSpace(attachedGuestName))
+                {
+                    if (!_usbForceDetachFallbackBusIds.Contains(busId)
+                        && withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
+                    {
+                        try
+                        {
+                            var detached = await TryDetachBusWithRetryAsync(
+                                busId,
+                                initialDelay: TimeSpan.Zero,
+                                token,
+                                context: "loopback-no-guest-activity-unknown-owner");
+
+                            if (detached)
+                            {
+                                _usbVmNotRunningSinceUtc.Remove(busId);
+                                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                                _usbAttachedWithoutAckAttempts.Remove(busId);
+                                _usbForceDetachFallbackBusIds.Remove(busId);
+                                detachedCount++;
+
+                                Log.Information(
+                                    "USB auto-detach executed after missing guest activity for {GraceSeconds}s with unknown owner mapping. BusId={BusId}",
+                                    (int)LoopbackManagedUsbAttachGraceFloor.TotalSeconds,
+                                    busId);
+                                continue;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            var attempt = _usbAttachedWithoutAckAttempts.TryGetValue(busId, out var existingAttempt)
+                                ? existingAttempt + 1
+                                : 1;
+                            _usbAttachedWithoutAckAttempts[busId] = attempt;
+
+                            if (attempt >= 3)
+                            {
+                                _usbForceDetachFallbackBusIds.Add(busId);
+                            }
+
+                            Log.Warning(
+                                ex,
+                                "USB auto-detach after missing guest activity (unknown owner) failed. BusId={BusId}; Attempt={Attempt}",
+                                busId,
+                                attempt);
+                        }
+                    }
+
+                    _usbVmNotRunningSinceUtc.Remove(busId);
+                    _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                    continue;
+                }
+
+                if (_usbVmOffDetachManualRequiredBusIds.Contains(busId))
+                {
+                    continue;
+                }
+
+                if (!_usbVmNotRunningSinceUtc.TryGetValue(busId, out var unknownOwnerNotRunningSinceUtc))
+                {
+                    _usbVmNotRunningSinceUtc[busId] = now;
+                    continue;
+                }
+
+                if ((now - unknownOwnerNotRunningSinceUtc) < VmAutoDetachDelayAfterVmStop)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var detachedUnknownOwner = await TryDetachBusWithRetryAsync(
+                        busId,
+                        initialDelay: TimeSpan.Zero,
+                        token,
+                        context: "vm-not-running-unknown-owner");
+
+                    if (!detachedUnknownOwner)
+                    {
+                        _usbVmNotRunningSinceUtc.Remove(busId);
+                        _usbVmOffDetachManualRequiredBusIds.Add(busId);
+                        continue;
+                    }
+
+                    _usbVmNotRunningSinceUtc.Remove(busId);
+                    _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                    detachedCount++;
+
+                    Log.Information(
+                        "USB auto-detach executed for loopback attach without VM ownership mapping after {DelaySeconds}s. BusId={BusId}; AttachedGuestName={AttachedGuestName}",
+                        (int)VmAutoDetachDelayAfterVmStop.TotalSeconds,
+                        busId,
+                        string.IsNullOrWhiteSpace(attachedGuestName) ? "-" : attachedGuestName);
+                }
+                catch (Exception ex)
+                {
+                    _usbVmNotRunningSinceUtc.Remove(busId);
+                    _usbVmOffDetachManualRequiredBusIds.Add(busId);
+                    Log.Warning(
+                        ex,
+                        "USB auto-detach without VM ownership mapping failed; manual detach/unshare required. BusId={BusId}; AttachedGuestName={AttachedGuestName}",
+                        busId,
+                        string.IsNullOrWhiteSpace(attachedGuestName) ? "-" : attachedGuestName);
+                }
+
                 continue;
             }
 
@@ -4952,6 +5150,41 @@ public partial class MainViewModel : ViewModelBase
             {
                 _usbTrayRefreshGate.Release();
             }
+        }
+    }
+
+    public async Task RefreshVmRuntimeStatesFromTrayAsync()
+    {
+        if (!await _vmStatusRefreshGate.WaitAsync(0))
+        {
+            return;
+        }
+
+        try
+        {
+            var runtimeVms = await _hyperVService.GetVmsAsync(_lifetimeCancellation.Token);
+            UpdateVmRuntimeStates(runtimeVms);
+            ReconcileVmMonitoringRuntimeStates();
+
+            if (SelectedVm is not null)
+            {
+                var selectedRuntime = runtimeVms.FirstOrDefault(vm =>
+                    string.Equals(vm.Name, SelectedVm.Name, StringComparison.OrdinalIgnoreCase));
+
+                SelectedVmState = selectedRuntime?.State ?? SelectedVm.RuntimeState ?? "Unbekannt";
+                SelectedVmCurrentSwitch = NormalizeSwitchDisplayName(selectedRuntime?.CurrentSwitchName ?? SelectedVm.RuntimeSwitchName);
+            }
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Background VM runtime refresh failed.");
+        }
+        finally
+        {
+            _vmStatusRefreshGate.Release();
         }
     }
 

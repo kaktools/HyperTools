@@ -15,6 +15,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
+using Microsoft.Win32;
 using Windows.Graphics;
 using Windows.UI;
 
@@ -33,8 +34,8 @@ public sealed partial class App : Application
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
     private const int UsbServiceOperationTimeoutSeconds = 12;
     private const int GuestUsbHeartbeatIntervalSeconds = 45;
-    private const int GuestStaleExportDisconnectSignalThreshold = 3;
-    private const int GuestStaleExportDisconnectSignalMinAgeSeconds = 30;
+    private const int GuestStaleExportDisconnectSignalThreshold = 2;
+    private const int GuestStaleExportDisconnectSignalMinAgeSeconds = 12;
     private const int GuestLocalDetachSignalThreshold = 3;
     private const int GuestLocalDetachSignalMinAgeSeconds = 25;
     private const int GuestAutoDisconnectSuppressionSecondsAfterAttach = 180;
@@ -72,6 +73,9 @@ public sealed partial class App : Application
     private bool _isThemeWindowReopenInProgress;
     private bool _isTrayFunctional;
     private bool _minimizeToTray = true;
+    private readonly object _sessionEndingHookSync = new();
+    private bool _sessionEndingHookRegistered;
+    private int _sessionEndingDisconnectStarted;
 
     private Mutex? _singleInstanceMutex;
     private CancellationTokenSource? _singleInstanceServerCts;
@@ -1351,6 +1355,7 @@ public sealed partial class App : Application
             _config.Usb.UseHyperVSocket = true;
             _currentUsbTransportUseHyperVSocket = true;
             GuestLogger.Initialize(_config.Logging, _config.Ui.DebugLoggingEnabled);
+            RegisterSessionEndingHook();
             GuestLogger.Info("ui.startup", "HyperTool Guest UI gestartet.", new
             {
                 configPath = _configPath,
@@ -1651,6 +1656,7 @@ public sealed partial class App : Application
             const int inlineExitAnimationDurationMs = 2000;
 
             _isExitRequested = true;
+            UnregisterSessionEndingHook();
 
             _trayControlCenterWindow?.Close();
             _trayControlCenterWindow = null;
@@ -1719,6 +1725,157 @@ public sealed partial class App : Application
         {
             _isExitAnimationRunning = false;
         }
+    }
+
+    private void RegisterSessionEndingHook()
+    {
+        lock (_sessionEndingHookSync)
+        {
+            if (_sessionEndingHookRegistered)
+            {
+                return;
+            }
+
+            try
+            {
+                SystemEvents.SessionEnding += OnSystemSessionEnding;
+                _sessionEndingHookRegistered = true;
+                GuestLogger.Debug("ui.session_ending_hook.registered", "Windows SessionEnding-Hook registriert.");
+            }
+            catch (Exception ex)
+            {
+                GuestLogger.Warn("ui.session_ending_hook.register_failed", ex.Message, new
+                {
+                    exceptionType = ex.GetType().FullName
+                });
+            }
+        }
+    }
+
+    private void UnregisterSessionEndingHook()
+    {
+        lock (_sessionEndingHookSync)
+        {
+            if (!_sessionEndingHookRegistered)
+            {
+                return;
+            }
+
+            try
+            {
+                SystemEvents.SessionEnding -= OnSystemSessionEnding;
+            }
+            catch
+            {
+            }
+
+            _sessionEndingHookRegistered = false;
+        }
+    }
+
+    private void OnSystemSessionEnding(object sender, SessionEndingEventArgs e)
+    {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
+        if (_config?.Usb?.DisconnectOnExit == false)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _sessionEndingDisconnectStarted, 1) == 1)
+        {
+            return;
+        }
+
+        GuestLogger.Info("ui.session_ending", "Windows-Session wird beendet. Starte letzten aggressiven USB-Disconnect-Versuch.", new
+        {
+            reason = e.Reason.ToString(),
+            disconnectOnExit = _config?.Usb?.DisconnectOnExit != false
+        });
+
+        try
+        {
+            var sessionEndingTask = Task.Run(TryDisconnectAllAttachedUsbOnSessionEndingAsync);
+            if (!sessionEndingTask.Wait(TimeSpan.FromSeconds(6)))
+            {
+                GuestLogger.Warn("usb.session_ending_disconnect.timeout", "USB-Disconnect beim SessionEnding hat das Zeitbudget erreicht.", new
+                {
+                    timeoutSeconds = 6
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            GuestLogger.Warn("usb.session_ending_disconnect.failed", ex.Message, new
+            {
+                exceptionType = ex.GetType().FullName
+            });
+        }
+    }
+
+    private async Task TryDisconnectAllAttachedUsbOnSessionEndingAsync()
+    {
+        if (_config?.Usb?.DisconnectOnExit == false)
+        {
+            return;
+        }
+
+        var attachedBusIds = _usbDevices
+            .Where(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId))
+            .Select(device => device.BusId.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (attachedBusIds.Count == 0)
+        {
+            GuestLogger.Debug("usb.session_ending_disconnect.skipped", "Kein lokales USB-Attach für SessionEnding-Disconnect gefunden.");
+            return;
+        }
+
+        var disconnectedCount = 0;
+        var failedCount = 0;
+        var deadlineUtc = DateTimeOffset.UtcNow.AddSeconds(8);
+
+        foreach (var busId in attachedBusIds)
+        {
+            if (DateTimeOffset.UtcNow >= deadlineUtc)
+            {
+                break;
+            }
+
+            try
+            {
+                var result = await DisconnectUsbAsync(busId, bypassHostFeaturePolicy: true);
+                if (result == 0)
+                {
+                    disconnectedCount++;
+                }
+                else
+                {
+                    failedCount++;
+                }
+            }
+            catch (Exception ex)
+            {
+                failedCount++;
+                GuestLogger.Warn("usb.session_ending_disconnect.item_failed", ex.Message, new
+                {
+                    busId,
+                    exceptionType = ex.GetType().FullName
+                });
+            }
+        }
+
+        GuestLogger.Info("usb.session_ending_disconnect.done", "SessionEnding-USB-Disconnect abgeschlossen.", new
+        {
+            requestedCount = attachedBusIds.Count,
+            disconnectedCount,
+            failedCount,
+            timedOut = DateTimeOffset.UtcNow >= deadlineUtc
+        });
     }
 
     private async Task RestartForThemeChangeAsync(string targetTheme)
