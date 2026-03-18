@@ -111,6 +111,31 @@ internal sealed class GuestTrayControlCenterWindow : Window
         ApplyButtonColors(_closeButton, actionButtonBackground, actionButtonForeground, actionButtonBorder);
     }
 
+    public async Task<ContentDialogResult> ShowDisableAutoConnectAfterDisconnectPromptAsync(string deviceDescription)
+    {
+        if (Content is not FrameworkElement root || root.XamlRoot is null)
+        {
+            return ContentDialogResult.Secondary;
+        }
+
+        var safeDeviceDescription = string.IsNullOrWhiteSpace(deviceDescription)
+            ? "dieses Gerät"
+            : deviceDescription.Trim();
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = root.XamlRoot,
+            Title = "Auto-Connect deaktivieren?",
+            Content = $"USB wurde getrennt ({safeDeviceDescription}). Soll Auto-Connect für dieses Gerät ebenfalls deaktiviert werden?",
+            PrimaryButtonText = "Deaktivieren",
+            SecondaryButtonText = "Behalten",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Secondary
+        };
+
+        return await dialog.ShowAsync();
+    }
+
     public void UpdateView(
         IReadOnlyList<UsbIpDeviceInfo> devices,
         string? selectedBusId,

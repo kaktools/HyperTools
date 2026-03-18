@@ -4309,13 +4309,156 @@ public sealed partial class App : Application
             return;
         }
 
+        var autoConnectWasEnabled = IsAutoConnectConfiguredForDevice(selected);
+        var disableAutoConnectAfterDisconnect = false;
+
+        if (autoConnectWasEnabled)
+        {
+            var decision = await ShowDisableAutoConnectAfterTrayDisconnectPromptAsync(selected.Description);
+            if (decision == ContentDialogResult.None)
+            {
+                return;
+            }
+
+            disableAutoConnectAfterDisconnect = decision == ContentDialogResult.Primary;
+        }
+
         var result = await DisconnectUsbAsync(selected.BusId);
         if (result == 0)
         {
+            if (autoConnectWasEnabled && disableAutoConnectAfterDisconnect)
+            {
+                await DisableUsbAutoConnectForDeviceAsync(selected);
+            }
+
             await Task.Delay(TimeSpan.FromSeconds(3));
         }
 
         await RefreshUsbDevicesAsync();
+    }
+
+    private bool IsAutoConnectConfiguredForDevice(UsbIpDeviceInfo device)
+    {
+        var configuredKeys = _config?.Usb?.AutoConnectDeviceKeys;
+        if (configuredKeys is null || configuredKeys.Count == 0)
+        {
+            return false;
+        }
+
+        var keySet = new HashSet<string>(
+            configuredKeys
+                .Where(static key => !string.IsNullOrWhiteSpace(key))
+                .Select(static key => key.Trim()),
+            StringComparer.OrdinalIgnoreCase);
+
+        if (keySet.Count == 0)
+        {
+            return false;
+        }
+
+        return IsConfiguredAutoConnectForDevice(keySet, _usbDevices, device);
+    }
+
+    private async Task DisableUsbAutoConnectForDeviceAsync(UsbIpDeviceInfo device)
+    {
+        if (_config is null)
+        {
+            return;
+        }
+
+        _config.Usb ??= new GuestUsbSettings();
+        var keys = _config.Usb.AutoConnectDeviceKeys ?? [];
+        if (keys.Count == 0)
+        {
+            return;
+        }
+
+        var key = BuildUsbAutoConnectKey(device);
+        var baseKey = BuildUsbAutoConnectBaseKey(device);
+        var changed = keys.RemoveAll(existing =>
+                string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrWhiteSpace(baseKey)
+                    && (string.Equals(existing, baseKey, StringComparison.OrdinalIgnoreCase)
+                        || existing.StartsWith(baseKey + "|meta:", StringComparison.OrdinalIgnoreCase)))) > 0;
+
+        if (!changed)
+        {
+            return;
+        }
+
+        _config.Usb.AutoConnectDeviceKeys = keys
+            .Where(static entry => !string.IsNullOrWhiteSpace(entry))
+            .Select(static entry => entry.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        await SaveConfigAsync(_config);
+    }
+
+    private async Task<ContentDialogResult> ShowDisableAutoConnectAfterTrayDisconnectPromptAsync(string deviceDescription)
+    {
+        var safeDeviceDescription = string.IsNullOrWhiteSpace(deviceDescription)
+            ? "dieses Gerät"
+            : deviceDescription.Trim();
+
+        if (_mainWindow?.Content is FrameworkElement root
+            && root.XamlRoot is not null)
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
+            var isWindowVisible = _mainWindow.AppWindow.IsVisible;
+            var isWindowMinimized = hwnd != IntPtr.Zero && IsIconic(hwnd);
+
+            if (isWindowVisible && !isWindowMinimized)
+            {
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = root.XamlRoot,
+                    Title = "Auto-Connect deaktivieren?",
+                    Content = $"USB wurde getrennt ({safeDeviceDescription}). Soll Auto-Connect für dieses Gerät ebenfalls deaktiviert werden?",
+                    PrimaryButtonText = "Deaktivieren",
+                    SecondaryButtonText = "Behalten",
+                    CloseButtonText = "Abbrechen",
+                    DefaultButton = ContentDialogButton.Secondary
+                };
+
+                return await dialog.ShowAsync();
+            }
+        }
+
+        try
+        {
+            EnsureTrayControlCenterWindow();
+            if (_trayControlCenterWindow is null)
+            {
+                return ContentDialogResult.Secondary;
+            }
+
+            UpdateTrayControlCenterView();
+
+            var trayWasVisible = _trayControlCenterWindow.AppWindow.IsVisible;
+            if (!trayWasVisible)
+            {
+                PositionTrayControlCenterNearTray();
+                _trayControlCenterWindow.AppWindow.Show();
+                _trayControlCenterWindow.Activate();
+            }
+
+            try
+            {
+                return await _trayControlCenterWindow.ShowDisableAutoConnectAfterDisconnectPromptAsync(safeDeviceDescription);
+            }
+            finally
+            {
+                if (!trayWasVisible && _trayControlCenterWindow.AppWindow.IsVisible)
+                {
+                    _trayControlCenterWindow.AppWindow.Hide();
+                }
+            }
+        }
+        catch
+        {
+            return ContentDialogResult.Secondary;
+        }
     }
 
     private async Task DisconnectAllAttachedUsbOnExitAsync()
