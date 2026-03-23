@@ -29,6 +29,8 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
     private Func<string, Task>? _selectUsbDeviceAction;
     private Func<bool>? _isTrayMenuEnabled;
     private Func<Task>? _refreshTrayDataAction;
+    private Action<EventHandler>? _unsubscribeTrayStateChanged;
+    private EventHandler? _trayStateChangedHandler;
     private Func<string, Task>? _startVmAction;
     private Func<string, Task>? _stopVmAction;
     private Func<string, Task>? _restartVmAction;
@@ -73,6 +75,8 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         Func<string, Task> selectUsbDeviceAction,
         Func<bool> isTrayMenuEnabled,
         Func<Task> refreshTrayDataAction,
+        Action<EventHandler> subscribeTrayStateChanged,
+        Action<EventHandler> unsubscribeTrayStateChanged,
         Func<string, Task> startVmAction,
         Func<string, Task> stopVmAction,
         Func<string, Task> restartVmAction,
@@ -96,6 +100,9 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         _selectUsbDeviceAction = selectUsbDeviceAction;
         _isTrayMenuEnabled = isTrayMenuEnabled;
         _refreshTrayDataAction = refreshTrayDataAction;
+        _unsubscribeTrayStateChanged = unsubscribeTrayStateChanged;
+        _trayStateChangedHandler = (_, _) => OnTrayStateChanged();
+        subscribeTrayStateChanged(_trayStateChangedHandler);
         _startVmAction = startVmAction;
         _stopVmAction = stopVmAction;
         _restartVmAction = restartVmAction;
@@ -187,6 +194,12 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
 
     public void Dispose()
     {
+        if (_trayStateChangedHandler is not null)
+        {
+            _unsubscribeTrayStateChanged?.Invoke(_trayStateChangedHandler);
+            _trayStateChangedHandler = null;
+        }
+
         Enqueue(() =>
         {
             if (_window is not null)
@@ -619,18 +632,35 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         }
     }
 
+    private void OnTrayStateChanged()
+    {
+        Enqueue(() =>
+        {
+            _ = RefreshFromTrayStateChangeAsync();
+        });
+    }
+
+    private async Task RefreshFromTrayStateChangeAsync()
+    {
+        try
+        {
+            await RefreshDataAsync(refreshBackend: false);
+            await RefreshSelectedVmAdaptersAsync();
+            SyncSelectedSwitchWithVm();
+            UpdateWindowView();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Tray control center state-change refresh failed.");
+        }
+    }
+
     private void SyncSelectedSwitchWithVm()
     {
         var vm = GetSelectedVm();
         if (vm is null)
         {
             _selectedSwitchName = null;
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(_selectedSwitchName)
-            && _switches.Any(vmSwitch => string.Equals(vmSwitch.Name, _selectedSwitchName, StringComparison.OrdinalIgnoreCase)))
-        {
             return;
         }
 

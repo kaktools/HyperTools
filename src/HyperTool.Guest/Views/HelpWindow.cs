@@ -74,7 +74,7 @@ public sealed class HelpWindow : Window
         bodyStack.Children.Add(CreateSection("Transport Diagnose", "Im Info-Bereich siehst du Hyper-V Socket- und Registry-Status; der Test-Button prüft den Socket direkt. Bei erfolgreichem Test wird im Guest-Log gezielt \"usb.transport.hyperv.test.stable\" geschrieben."));
         bodyStack.Children.Add(CreateSection("Einstellungen", "Tasktray-Verhalten, Start mit Windows, Start minimiert, Updatecheck beim Start und Theme konfigurieren. Über 'Tool neu starten' wird die App mit kurzem Reload-Screen neu geladen."));
         bodyStack.Children.Add(CreateSection("Single Instance", "Ein zweiter Start blendet die bereits laufende Guest-App ein."));
-        bodyStack.Children.Add(CreateSection("Tray Control Center", "Linksklick und Rechtsklick im Tray öffnen das USB-zentrierte Control Center mit Schnellaktionen."));
+        bodyStack.Children.Add(CreateSection("Tray Control Center", "Doppelklick links im Tray blendet die App ein/aus. Rechtsklick öffnet das USB-zentrierte Control Center mit Schnellaktionen."));
         bodyStack.Children.Add(CreateSection("Logs", "'Logs öffnen' öffnet immer den Log-Ordner (nicht einzelne Dateien)."));
         bodyStack.Children.Add(CreateHiddenRainbowPrincessTrigger());
 

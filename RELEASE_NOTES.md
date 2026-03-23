@@ -1,5 +1,45 @@
 # HyperTool Release Notes
 
+## v2.5.9
+
+### Highlights
+
+- Legacy-USB-Discovery-Firewallregeln werden bei Host/Guest-Setup und beim App-Start aktiv bereinigt; neue Discovery-Regeln werden nicht mehr angelegt.
+- Rechtsklick im Tray öffnet wieder das richtige Control Center; Linksdoppelklick blendet Host- und Guest-App ein bzw. aus.
+- Das Guest-Control-Center bleibt stabil an der Taskleiste verankert und springt nicht mehr in problematischen Fällen an den oberen Desktop-Rand.
+- Host-Tasktray und Haupt-App synchronisieren Netzwerk-Switch-Änderungen wieder deutlich konsistenter.
+
+### Verbessert
+
+- Firewall/Setup:
+	- Host-Installer erstellt keine alten `HyperTool USB Discovery (UDP-In/UDP-Out)`-Regeln mehr.
+	- Guest-Installer erstellt keine alte `HyperTool Guest USB Discovery (UDP-Out)`-Regel mehr.
+	- Bestehende Legacy-Regeln werden bei Install/Upgrade aktiv entfernt.
+	- Host bereinigt zusätzlich eingehende `usbipd`-Firewallregeln, die für den früheren USB-Discovery-/Netzwerkpfad nicht mehr benötigt werden.
+	- Host und Guest führen dieselbe Bereinigung zusätzlich beim Start aus, damit auch Update-Pfade ohne vollständige Installer-Deinstallation aufgeräumt werden.
+- Tray/Bedienung:
+	- Rechtsklick öffnet wieder das jeweilige Control Center statt des klassischen Kontextmenüs.
+	- Linksdoppelklick schaltet die Sichtbarkeit der Haupt-App um, ohne das Control Center zu öffnen.
+	- Hilfe-/Infotexte für Host und Guest wurden auf das neue Klickverhalten angepasst.
+- Guest Control Center:
+	- Positionierung nahe der Taskleiste nutzt jetzt robuste Bounds-Prüfungen auch dann, wenn die verfügbare Workarea kleiner als das Panel ist.
+	- Dadurch wird das Fenster nicht mehr fälschlich an eine unpassende Desktop-Position geklemmt.
+- Host Tray-Sync:
+	- Das Host-Control-Center reagiert jetzt direkt auf `TrayStateChanged` aus dem ViewModel.
+	- VM-Adapter-/Switch-Zustände werden nach Änderungen im Hauptfenster oder im Tray wieder sauber gegeneinander nachgezogen.
+	- Die ausgewählte Switch-Anzeige folgt wieder korrekt dem tatsächlichen Runtime-Zustand der ausgewählten VM bzw. des gewählten Adapters.
+
+### Behoben
+
+- Inno-Setup-Fehler durch PowerShell-Scriptblock-Syntax in `HyperTool.iss` wurden beseitigt.
+- Host/Guest konnten nach dem Tray-Klick-Umbau zeitweise das falsche Menü statt des Control Centers öffnen.
+- Das Guest-Control-Center konnte in bestimmten Taskleisten-/Auflösungs-Konstellationen oben auf dem Desktop erscheinen.
+- Switch-Änderungen im Host konnten zwischen Tray und Hauptfenster sichtbar auseinanderlaufen.
+
+### Doku
+
+- README auf `v2.5.9` aktualisiert (Release-Stand, Firewall-Bereinigung und Tray-/Control-Center-Verhalten).
+
 ## v2.5.8
 
 ### Highlights

@@ -163,7 +163,7 @@ public sealed class TrayService : ITrayService
         {
             try
             {
-                if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)
+                if (e.Button == MouseButtons.Right)
                 {
                     _hideControlCenterAction?.Invoke();
                     HideQuickPanel();
@@ -199,7 +199,7 @@ public sealed class TrayService : ITrayService
         {
             try
             {
-                if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right)
+                if (e.Button != MouseButtons.Left)
                 {
                     return;
                 }
@@ -207,13 +207,13 @@ public sealed class TrayService : ITrayService
                 _hideControlCenterAction?.Invoke();
                 HideQuickPanel();
 
-                if (IsTrayMenuEnabled())
+                if (IsWindowVisible())
                 {
-                    _toggleControlCenterAction?.Invoke();
+                    _hideAction?.Invoke();
                 }
                 else
                 {
-                    _toggleControlCenterCompactAction?.Invoke();
+                    _showAction?.Invoke();
                 }
             }
             catch (Exception ex)

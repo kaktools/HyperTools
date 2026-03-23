@@ -4,26 +4,12 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.5.8**
-- Host-USB-Auto-Detach ist bei VM-/USB-Refresh jetzt deutlich konservativer: frische Guest-Heartbeats/Acks verhindern ungewollte Detachs.
-- Guest-USB bleibt bei Host-VM-Refresh und Host-USB-Refresh stabil attached, statt durch transiente Statuswechsel getrennt zu werden.
-- Troll-/Disco-Phasen verursachen keine ungewollten USB-Disconnect-Kaskaden mehr zwischen Guest und Host.
-- Guest unterdrückt automatische `usb-disconnected`-Signale temporär bei interaktivem USB-Refresh und im Troll-Mode (Schutzfenster).
-- VM-Status-Chip im Host aktualisiert sich nach Shutdown wieder korrekt ohne manuelles Neu-Auswählen/Refresh.
-- Guest zeigt beim manuellen USB-Disconnect mit aktivem Auto-Connect jetzt eine Nachfrage, ob Auto-Connect ebenfalls deaktiviert werden soll.
-- Snapshot-Beschreibungen bleiben nach Reload/Neustart erhalten (persistente Override-Speicherung im Host).
-- Host-USB-Auto-Detach nutzt jetzt eine klare Trigger-Policy: nur bei Guest-Disconnect oder wenn die zugehörige VM-ID mindestens 10 Sekunden nicht läuft.
-- In der Host-USB-Leiste gibt es einen dedizierten `Detach`-Button direkt neben `Share` und `Unshare`.
-- Der UI-Schalter für automatisches Detach wurde entfernt; die Option ist weiterhin per Config steuerbar.
-- Detach (manuell + Auto-Detach) läuft im Host ohne zusätzliche UAC-Elevation.
-- Recovery bei stale Exports ist wieder begrenzt aktiv: Retry/Grace/Delay aus der Host-Config plus Guest-Signal bei wiederholtem `already exported`.
-- Host reagiert bei `usb-disconnected` jetzt schneller (kürzeres Debounce), wodurch Auto-Detach deutlich früher greift.
-- Guest verarbeitet Host-USB-Änderungspushes jetzt mit erzwungenem Sofort-Refresh (ohne internes Rate-Limit), damit Busy/Detach-Zustände schneller konsistent werden.
-- Safe-Start für Konfigurationen: Bei defekter Host-/Guest-Config wird automatisch eine `.corrupt.*`-Sicherung angelegt und mit Standardwerten weitergestartet.
-- Guest nutzt für USB jetzt ausschließlich Hyper-V Socket; IP-Mode/IP-Fallback wurde entfernt.
-- USB-Header-Chip zeigt den Hyper-V-Zustand klar als aktiv (grün), inaktiv (grau) oder Fehler (rot).
-- Ein erfolgreicher Guest-Transporttest schreibt jetzt gezielte Stabilitäts-Logs (`usb.transport.hyperv.test.stable`), inklusive Host-Bestätigung.
-- Shared-Folder-Ersetzen im Guest ist korrigiert: Explorer-Dialog `Datei ersetzen` funktioniert ohne `Ungültige MS-DOS-Funktion`.
+- Version: **v2.5.9**
+- Host und Guest bereinigen alte USB-Discovery-Firewallregeln bei Setup/Start automatisch; neue UDP-Discovery-Regeln werden nicht mehr angelegt.
+- Veraltete eingehende `usbipd`-Firewallregeln werden beim Host-Update entfernt, da HyperTool USB im Guest nur noch über Hyper-V Socket nutzt.
+- Rechtsklick auf das Tray-Icon öffnet wieder das richtige Control Center; Linksdoppelklick blendet Host/Guest-App ein oder aus.
+- Das Guest-Control-Center landet bei problematischen Taskleisten-/Workarea-Konstellationen nicht mehr oben auf dem Desktop.
+- Host-Tasktray und Hauptfenster synchronisieren VM-Switch-Änderungen wieder zuverlässiger in beide Richtungen.
 
 ## Projekte
 

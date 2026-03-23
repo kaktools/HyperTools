@@ -16,6 +16,8 @@ internal interface ITrayControlCenterService : IDisposable
         Func<string, Task> selectUsbDeviceAction,
         Func<bool> isTrayMenuEnabled,
         Func<Task> refreshTrayDataAction,
+        Action<EventHandler> subscribeTrayStateChanged,
+        Action<EventHandler> unsubscribeTrayStateChanged,
         Func<string, Task> startVmAction,
         Func<string, Task> stopVmAction,
         Func<string, Task> restartVmAction,

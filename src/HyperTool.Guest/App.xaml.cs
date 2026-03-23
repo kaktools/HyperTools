@@ -1326,6 +1326,39 @@ public sealed partial class App : Application
         return Color.FromArgb(alpha, r, g, b);
     }
 
+    private static void TryRemoveLegacyUsbFirewallRules()
+    {
+        try
+        {
+            const string cleanupScript = "Get-NetFirewallRule -DisplayName 'HyperTool Guest USB Discovery (UDP-Out)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue";
+
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    using var process = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "powershell.exe",
+                        Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + cleanupScript + "\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden
+                    });
+
+                    process?.WaitForExit(12000);
+                }
+                catch (Exception ex)
+                {
+                    GuestLogger.Debug("firewall.cleanup.skipped", ex.Message);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            GuestLogger.Debug("firewall.cleanup.init_skipped", ex.Message);
+        }
+    }
+
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
         try
@@ -1356,6 +1389,7 @@ public sealed partial class App : Application
             _config.Usb.UseHyperVSocket = true;
             _currentUsbTransportUseHyperVSocket = true;
             GuestLogger.Initialize(_config.Logging, _config.Ui.DebugLoggingEnabled);
+            TryRemoveLegacyUsbFirewallRules();
             RegisterSessionEndingHook();
             GuestLogger.Info("ui.startup", "HyperTool Guest UI gestartet.", new
             {
@@ -2390,8 +2424,27 @@ public sealed partial class App : Application
             x = work.X + work.Width - scaledPopupWidth - 8;
         }
 
-        x = Math.Clamp(x, work.X + 8, work.X + work.Width - scaledPopupWidth - 8);
-        y = Math.Clamp(y, work.Y + 8, work.Y + work.Height - scaledPopupHeight - 8);
+        var minX = work.X + 8;
+        var maxX = work.X + work.Width - scaledPopupWidth - 8;
+        if (maxX < minX)
+        {
+            x = work.X;
+        }
+        else
+        {
+            x = Math.Clamp(x, minX, maxX);
+        }
+
+        var minY = work.Y + 8;
+        var maxY = work.Y + work.Height - scaledPopupHeight - 8;
+        if (maxY < minY)
+        {
+            y = work.Y;
+        }
+        else
+        {
+            y = Math.Clamp(y, minY, maxY);
+        }
 
         try
         {

@@ -269,6 +269,7 @@ public sealed partial class App : Application
             Log.Information("Logging initialized at {LogPath}", logPath);
             Log.Debug("Host configuration loaded. ConfigPath={ConfigPath}; DebugLoggingEnabled={DebugLoggingEnabled}", configResult.ConfigPath, configResult.Config.Ui.DebugLoggingEnabled);
             _hostHyperVMonitorEnabled = configResult.Config.Ui.DebugLoggingEnabled;
+            TryRemoveLegacyUsbFirewallRules();
 
             EnsureHyperVSocketServiceRegistrationsAtStartup();
             Log.Debug("Starting host communication listeners.");
@@ -1656,6 +1657,39 @@ public sealed partial class App : Application
         }
     }
 
+    private static void TryRemoveLegacyUsbFirewallRules()
+    {
+        try
+        {
+            var cleanupScript = "$legacyNames=@('HyperTool USB Discovery (UDP-In)','HyperTool USB Discovery (UDP-Out)','HyperTool Guest USB Discovery (UDP-Out)'); foreach($n in $legacyNames){ Get-NetFirewallRule -DisplayName $n -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue }; Get-NetFirewallRule -Direction Inbound -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match '(?i)usbipd' } | Remove-NetFirewallRule -ErrorAction SilentlyContinue";
+
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    using var process = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "powershell.exe",
+                        Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + cleanupScript + "\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden
+                    });
+
+                    process?.WaitForExit(12000);
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug(ex, "Legacy firewall cleanup skipped.");
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Legacy firewall cleanup initialization skipped.");
+        }
+    }
+
     private void TryInitializeTray(MainWindow mainWindow, MainViewModel mainViewModel)
     {
         _isTrayFunctional = false;
@@ -1692,6 +1726,8 @@ public sealed partial class App : Application
                 selectUsbDeviceAction: busId => mainViewModel.SelectUsbDeviceForTrayAsync(busId),
                 isTrayMenuEnabled: () => mainViewModel.UiEnableTrayMenu,
                 refreshTrayDataAction: () => mainViewModel.RefreshTrayDataAsync(),
+                subscribeTrayStateChanged: handler => mainViewModel.TrayStateChanged += handler,
+                unsubscribeTrayStateChanged: handler => mainViewModel.TrayStateChanged -= handler,
                 startVmAction: vmName => mainViewModel.StartVmFromTrayAsync(vmName),
                 stopVmAction: vmName => mainViewModel.StopVmFromTrayAsync(vmName),
                 restartVmAction: vmName => mainViewModel.RestartVmByNameCommand.ExecuteAsync(vmName),
