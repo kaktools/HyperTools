@@ -4,12 +4,11 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.5.9**
-- Host und Guest bereinigen alte USB-Discovery-Firewallregeln bei Setup/Start automatisch; neue UDP-Discovery-Regeln werden nicht mehr angelegt.
-- Veraltete eingehende `usbipd`-Firewallregeln werden beim Host-Update entfernt, da HyperTool USB im Guest nur noch über Hyper-V Socket nutzt.
-- Rechtsklick auf das Tray-Icon öffnet wieder das richtige Control Center; Linksdoppelklick blendet Host/Guest-App ein oder aus.
-- Das Guest-Control-Center landet bei problematischen Taskleisten-/Workarea-Konstellationen nicht mehr oben auf dem Desktop.
-- Host-Tasktray und Hauptfenster synchronisieren VM-Switch-Änderungen wieder zuverlässiger in beide Richtungen.
+- Version: **v2.6.0**
+- Der Enhanced-Session-Modus für VM-Connect wird jetzt konsistent global über die UI-Einstellung gesteuert.
+- Die frühere VM-spezifische Option „Für diese VM immer mit Sitzungsbearbeitung öffnen“ wurde aus der VM-Übersicht entfernt.
+- In den Schnelleinstellungen gibt es dafür den zentralen Schalter „Enhanced Sessios Modus“.
+- Öffnen von VM-Connect nutzt damit in allen Pfaden dieselbe, eindeutige Einstellung.
 
 ## Projekte
 

@@ -1,5 +1,27 @@
 # HyperTool Release Notes
 
+## v2.6.0
+
+### Highlights
+
+- Enhanced-Session-Verhalten für VM-Connect wurde vereinheitlicht: statt VM-spezifischer Abweichungen gilt jetzt eine zentrale globale UI-Einstellung.
+- Die Option „Für diese VM immer mit Sitzungsbearbeitung öffnen“ wurde aus der VM-Übersicht entfernt, um widersprüchliche Zustände zu vermeiden.
+- Der globale Schalter „Enhanced Sessios Modus“ wurde in die Schnelleinstellungen integriert.
+
+### Verbessert
+
+- VM-Connect-Entscheidungslogik nutzt jetzt durchgängig den globalen Wert `UiOpenVmConnectWithSessionEdit`.
+- Alte Fallback-/Override-Logik über VM-Metadaten wurde entfernt, wodurch Verhalten und Erwartung in Host-UI und Laufzeit identisch sind.
+
+### Behoben
+
+- Fälle, in denen VM-spezifische Session-Flags vom globalen UI-Zustand abweichen konnten, treten nicht mehr auf.
+- Inkonsistentes Öffnungsverhalten von VM-Connect durch konkurrierende Einstellungen wurde beseitigt.
+
+### Doku
+
+- README auf `v2.6.0` aktualisiert (Release-Stand und Hinweise zum zentralen Enhanced-Session-Schalter).
+
 ## v2.5.9
 
 ### Highlights
