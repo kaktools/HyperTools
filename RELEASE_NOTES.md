@@ -7,11 +7,13 @@
 - Enhanced-Session-Verhalten für VM-Connect wurde vereinheitlicht: statt VM-spezifischer Abweichungen gilt jetzt eine zentrale globale UI-Einstellung.
 - Die Option „Für diese VM immer mit Sitzungsbearbeitung öffnen“ wurde aus der VM-Übersicht entfernt, um widersprüchliche Zustände zu vermeiden.
 - Der globale Schalter „Enhanced Sessios Modus“ wurde in die Schnelleinstellungen integriert.
+- Das USB-Navigationssymbol im Host wurde von `🔌` auf `🔗` angepasst.
 
 ### Verbessert
 
 - VM-Connect-Entscheidungslogik nutzt jetzt durchgängig den globalen Wert `UiOpenVmConnectWithSessionEdit`.
 - Alte Fallback-/Override-Logik über VM-Metadaten wurde entfernt, wodurch Verhalten und Erwartung in Host-UI und Laufzeit identisch sind.
+- Sidebar-Icon für den Bereich `USB-Share` wurde auf das Link-Emoji vereinheitlicht.
 
 ### Behoben
 
