@@ -6,7 +6,6 @@
 
 - VMConnect-Hostnamen werden beim Start zuverlässig auf den aktuellen Rechnernamen des Hosts aktualisiert.
 - Tray-Doppelklick zum Ein-/Ausblenden wurde für Host und Guest stabilisiert, insbesondere bei minimiertem Autostart.
-- VMConnect-Verbindungsfehler durch den ungültigen Parameter `/fullscreen` wurden beseitigt.
 
 ### Verbessert
 
@@ -18,7 +17,6 @@
 
 - Nach Umbenennung des Host-Rechners blieb in einzelnen Konfigurationen noch ein veralteter VMConnect-Hostname stehen.
 - Bei minimiertem Start reagierte der Doppelklick auf das Tray-Icon in Host/Guest teils nicht zuverlässig auf Einblenden.
-- `vmconnect.exe` meldete beim Verbindungsaufbau „Die Option '/fullscreen' ist unbekannt“.
 
 ### Doku
 
