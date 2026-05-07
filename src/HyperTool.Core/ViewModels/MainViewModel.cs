@@ -9,6 +9,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Net.NetworkInformation;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -528,6 +529,7 @@ public partial class MainViewModel : ViewModelBase
     }
 
     public event EventHandler? TrayStateChanged;
+    public event EventHandler? StartupUpdateAvailable;
 
     public bool CanPromptSaveOnClose => HasPendingConfigChanges && !IsBusy;
 
@@ -708,7 +710,7 @@ public partial class MainViewModel : ViewModelBase
         SaveConfigCommand = new AsyncRelayCommand(SaveConfigAsync, () => !IsBusy);
         ReloadConfigCommand = new AsyncRelayCommand(ReloadConfigAsync, () => !IsBusy);
         RestartHnsCommand = new AsyncRelayCommand(RestartHnsAsync, () => !IsBusy);
-        CheckForUpdatesCommand = new AsyncRelayCommand(CheckForUpdatesAsync, () => !IsBusy);
+        CheckForUpdatesCommand = new AsyncRelayCommand(() => CheckForUpdatesAsync(), () => !IsBusy);
         InstallUpdateCommand = new AsyncRelayCommand(InstallUpdateAsync, () => !IsBusy && UpdateInstallAvailable && !string.IsNullOrWhiteSpace(InstallerDownloadUrl));
         OpenReleasePageCommand = new RelayCommand(OpenReleasePage);
         ToggleLogCommand = new RelayCommand(ToggleLog);
@@ -1359,7 +1361,7 @@ public partial class MainViewModel : ViewModelBase
 
         if (UpdateCheckOnStartup)
         {
-            await CheckForUpdatesAsync();
+            await CheckForUpdatesAsync(isStartupCheck: true);
         }
     }
 
@@ -1994,6 +1996,7 @@ public partial class MainViewModel : ViewModelBase
             }
 
             var preparedDevices = devices
+                .Where(IsUsbDeviceVisibleInHostList)
                 .OrderBy(GetUsbStatusSortRank)
                 .ThenBy(device => device.BusId, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(device => device.Description, StringComparer.OrdinalIgnoreCase)
@@ -2249,6 +2252,17 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return 3;
+    }
+
+    private static bool IsUsbDeviceVisibleInHostList(UsbIpDeviceInfo device)
+    {
+        // Hide stale persisted/shared remnants when a dongle was unplugged and may later appear with a new BUSID.
+        if (device.IsShared && !device.IsConnected && !device.IsAttached)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static bool IsBenignUsbUnshareCleanupFailure(Exception ex)
@@ -7035,10 +7049,29 @@ public partial class MainViewModel : ViewModelBase
         if (string.IsNullOrWhiteSpace(normalized)
             || string.Equals(normalized, "localhost", StringComparison.OrdinalIgnoreCase))
         {
-            return Environment.MachineName;
+            return ResolvePreferredVmConnectComputerName();
         }
 
         return normalized;
+    }
+
+    private static string ResolvePreferredVmConnectComputerName()
+    {
+        var machine = Environment.MachineName.Trim();
+
+        try
+        {
+            var domainName = IPGlobalProperties.GetIPGlobalProperties().DomainName?.Trim() ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(domainName))
+            {
+                return $"{machine}.{domainName}";
+            }
+        }
+        catch
+        {
+        }
+
+        return machine;
     }
 
     private bool ShouldOpenConsoleWithSessionEdit(string vmName)
@@ -7442,7 +7475,7 @@ public partial class MainViewModel : ViewModelBase
         AddNotification("Notifications in Zwischenablage kopiert.", "Info");
     }
 
-    private async Task CheckForUpdatesAsync()
+    private async Task CheckForUpdatesAsync(bool isStartupCheck = false)
     {
         await ExecuteBusyActionAsync("Prüfe GitHub-Version...", async token =>
         {
@@ -7474,6 +7507,11 @@ public partial class MainViewModel : ViewModelBase
             if (result.HasUpdate && !UpdateInstallAvailable)
             {
                 AddNotification("Update gefunden, aber kein Installer-Asset im Release erkannt. Bitte Release-Seite öffnen.", "Warning");
+            }
+
+            if (isStartupCheck && UpdateInstallAvailable)
+            {
+                StartupUpdateAvailable?.Invoke(this, EventArgs.Empty);
             }
 
             AddNotification(result.Message, result.HasUpdate ? "Success" : "Info");

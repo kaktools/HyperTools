@@ -108,6 +108,8 @@ internal sealed class GuestMainWindow : Window
     private string _installerFileName = string.Empty;
     private bool _updateCheckSucceeded;
     private bool _updateAvailable;
+    private bool _startupUpdatePromptShown;
+    private bool _startupUpdatePromptInProgress;
 
     private readonly ListView _usbListView = new();
     private readonly ToggleSwitch _usbFeatureEnabledToggleSwitch = new() { Header = null, OffContent = "", OnContent = "" };
@@ -4309,7 +4311,7 @@ internal sealed class GuestMainWindow : Window
             return;
         }
 
-        await CheckForUpdatesAsync();
+        await CheckForUpdatesAsync(isStartupCheck: true);
     }
 
     private async Task ApplyThemeAndRestartImmediatelyAsync()
@@ -4693,12 +4695,27 @@ internal sealed class GuestMainWindow : Window
                 await response.Content.CopyToAsync(stream);
             }
 
-            Process.Start(new ProcessStartInfo
+            var extension = IOPath.GetExtension(installerPath);
+            if (string.Equals(extension, ".msi", StringComparison.OrdinalIgnoreCase))
             {
-                FileName = installerPath,
-                UseShellExecute = true,
-                Verb = "runas"
-            });
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "msiexec.exe",
+                    Arguments = $"/i \"{installerPath}\" /qn /norestart",
+                    UseShellExecute = true,
+                    Verb = "runas"
+                });
+            }
+            else
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = installerPath,
+                    Arguments = "/SP- /VERYSILENT /SUPPRESSMSGBOXES /NOCANCEL /NORESTART",
+                    UseShellExecute = true,
+                    Verb = "runas"
+                });
+            }
 
             AppendNotification("[Success] usbip-win2 Installer gestartet. Nach Abschluss App neu starten.");
         }
@@ -4768,7 +4785,7 @@ internal sealed class GuestMainWindow : Window
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = "msiexec.exe",
-                    Arguments = $"/i \"{installerPath}\" /passive",
+                    Arguments = $"/i \"{installerPath}\" /qn /norestart",
                     UseShellExecute = true,
                     Verb = "runas"
                 });
@@ -4825,7 +4842,89 @@ internal sealed class GuestMainWindow : Window
         AppendNotification("[Info] Notifications in Zwischenablage kopiert.");
     }
 
-    private async Task CheckForUpdatesAsync()
+    private Task ShowStartupUpdatePromptAsync()
+    {
+        return ExecuteOnUiThreadAsync(async () =>
+        {
+            if (_startupUpdatePromptShown || _startupUpdatePromptInProgress || !CanInstallUpdate())
+            {
+                return;
+            }
+
+            _startupUpdatePromptInProgress = true;
+            var wasVisibleBeforePrompt = AppWindow?.IsVisible == true;
+
+            try
+            {
+                if (!wasVisibleBeforePrompt)
+                {
+                    AppWindow?.Show();
+                    Activate();
+                    await Task.Delay(120);
+                }
+
+                if (Content is not FrameworkElement root || root.XamlRoot is null)
+                {
+                    return;
+                }
+
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = root.XamlRoot,
+                    Title = "Update verfügbar",
+                    Content = "Für HyperTool Guest ist ein Update verfügbar. Soll das Update jetzt installiert werden?",
+                    PrimaryButtonText = "Jetzt installieren",
+                    SecondaryButtonText = "Später",
+                    DefaultButton = ContentDialogButton.Primary
+                };
+
+                _startupUpdatePromptShown = true;
+                var result = await dialog.ShowAsync();
+                if (result == ContentDialogResult.Primary)
+                {
+                    await InstallUpdateAsync();
+                }
+            }
+            finally
+            {
+                _startupUpdatePromptInProgress = false;
+
+                if (!wasVisibleBeforePrompt && AppWindow?.IsVisible == true)
+                {
+                    AppWindow.Hide();
+                }
+            }
+        });
+    }
+
+    private Task ExecuteOnUiThreadAsync(Func<Task> action)
+    {
+        if (DispatcherQueue.HasThreadAccess)
+        {
+            return action();
+        }
+
+        var tcs = new TaskCompletionSource<object?>();
+        if (!DispatcherQueue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await action();
+                    tcs.TrySetResult(null);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            }))
+        {
+            tcs.TrySetException(new InvalidOperationException("UI-Aktion konnte nicht in die DispatcherQueue eingeplant werden."));
+        }
+
+        return tcs.Task;
+    }
+
+    private async Task CheckForUpdatesAsync(bool isStartupCheck = false)
     {
         AppendNotification("[Info] Update-Prüfung gestartet.");
 
@@ -4873,6 +4972,11 @@ internal sealed class GuestMainWindow : Window
             else
             {
                 AppendNotification($"[Info] {result.Message}");
+            }
+
+            if (isStartupCheck && CanInstallUpdate())
+            {
+                await ShowStartupUpdatePromptAsync();
             }
         }
         else

@@ -21,6 +21,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Media;
+using System.Net.NetworkInformation;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -212,6 +213,8 @@ public sealed class MainWindow : Window
     private string _vmChipRefreshSignature = string.Empty;
     private bool _suppressHostFeatureToggleEvents;
     private bool _suppressUsbSelectionEvents;
+    private bool _startupUpdatePromptShown;
+    private bool _startupUpdatePromptInProgress;
     private bool _isPerformanceDiscoRunning;
     private PerformanceDiscoIntensity _performanceDiscoIntensity = PerformanceDiscoIntensity.Classic;
     private readonly Random _performanceDiscoRandom = new();
@@ -263,6 +266,7 @@ public sealed class MainWindow : Window
         DwmWindowHelper.ApplyContentCompensationForCurrentDpi(this, DefaultWindowWidth, DefaultWindowHeight);
 
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        _viewModel.StartupUpdateAvailable += OnStartupUpdateAvailable;
         _viewModel.AvailableVms.CollectionChanged += OnAvailableVmsCollectionChanged;
         _viewModel.AvailableVmNetworkAdapters.CollectionChanged += OnVmNetworkAdaptersCollectionChanged;
         _viewModel.AvailableSwitches.CollectionChanged += OnVmNetworkAdaptersCollectionChanged;
@@ -2272,6 +2276,65 @@ public sealed class MainWindow : Window
         return Content is FrameworkElement root ? root.XamlRoot : null;
     }
 
+    private void OnStartupUpdateAvailable(object? sender, EventArgs args)
+    {
+        RunOnUiThread(() => _ = ShowStartupUpdatePromptAsync());
+    }
+
+    private async Task ShowStartupUpdatePromptAsync()
+    {
+        if (_startupUpdatePromptShown || _startupUpdatePromptInProgress)
+        {
+            return;
+        }
+
+        _startupUpdatePromptInProgress = true;
+        var wasVisibleBeforePrompt = AppWindow?.IsVisible == true;
+
+        try
+        {
+            if (!wasVisibleBeforePrompt)
+            {
+                AppWindow?.Show();
+                Activate();
+                await Task.Delay(120);
+            }
+
+            var xamlRoot = TryGetDialogXamlRoot();
+            if (xamlRoot is null)
+            {
+                return;
+            }
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = xamlRoot,
+                Title = "Update verfügbar",
+                Content = "Für HyperTool ist ein Update verfügbar. Soll das Update jetzt installiert werden?",
+                PrimaryButtonText = "Jetzt installieren",
+                SecondaryButtonText = "Später",
+                DefaultButton = ContentDialogButton.Primary
+            };
+
+            _startupUpdatePromptShown = true;
+            var result = await dialog.ShowAsync();
+            if (result == ContentDialogResult.Primary
+                && _viewModel.InstallUpdateCommand.CanExecute(null))
+            {
+                await _viewModel.InstallUpdateCommand.ExecuteAsync(null);
+            }
+        }
+        finally
+        {
+            _startupUpdatePromptInProgress = false;
+
+            if (!wasVisibleBeforePrompt && AppWindow?.IsVisible == true)
+            {
+                AppWindow.Hide();
+            }
+        }
+    }
+
     private void UpdateSnapshotActionButtonsState()
     {
         if (_snapshotCreateButton is not null)
@@ -2676,6 +2739,7 @@ public sealed class MainWindow : Window
         var hostRow = new Grid { ColumnSpacing = 8, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0) };
         hostRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
         hostRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        hostRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         hostRow.Children.Add(new TextBlock
         {
             Text = "VMConnect Host",
@@ -2689,6 +2753,17 @@ public sealed class MainWindow : Window
         hostTextBox.TextChanged += (_, _) => _viewModel.VmConnectComputerName = hostTextBox.Text;
         Grid.SetColumn(hostTextBox, 1);
         hostRow.Children.Add(hostTextBox);
+
+        var useRecommendedHostNameButton = CreateIconButton("✦", "Auf empfohlenen Namen setzen", onClick: (_, _) =>
+        {
+            var recommendedName = ResolveRecommendedVmConnectHostName();
+            hostTextBox.Text = recommendedName;
+            _viewModel.VmConnectComputerName = recommendedName;
+            _viewModel.PublishNotification($"VMConnect Host auf empfohlenen Namen gesetzt: {recommendedName}", "Info");
+        });
+        useRecommendedHostNameButton.Margin = new Thickness(4, 0, 0, 0);
+        Grid.SetColumn(useRecommendedHostNameButton, 2);
+        hostRow.Children.Add(useRecommendedHostNameButton);
         systemStack.Children.Add(hostRow);
 
         systemSection.Child = systemStack;
@@ -2733,6 +2808,25 @@ public sealed class MainWindow : Window
         }
 
         return node;
+    }
+
+    private static string ResolveRecommendedVmConnectHostName()
+    {
+        var machineName = Environment.MachineName.Trim();
+
+        try
+        {
+            var domainName = IPGlobalProperties.GetIPGlobalProperties().DomainName?.Trim() ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(domainName))
+            {
+                return $"{machineName}.{domainName}";
+            }
+        }
+        catch
+        {
+        }
+
+        return machineName;
     }
 
     private static DataTemplate CreateCheckpointTreeItemTemplate()
@@ -5899,6 +5993,7 @@ public sealed class MainWindow : Window
         _vmChipAutoRefreshTimer = null;
 
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        _viewModel.StartupUpdateAvailable -= OnStartupUpdateAvailable;
         _viewModel.AvailableVms.CollectionChanged -= OnAvailableVmsCollectionChanged;
         _viewModel.AvailableVmNetworkAdapters.CollectionChanged -= OnVmNetworkAdaptersCollectionChanged;
         _viewModel.AvailableSwitches.CollectionChanged -= OnVmNetworkAdaptersCollectionChanged;
@@ -6394,7 +6489,7 @@ public sealed class MainWindow : Window
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = "msiexec.exe",
-                    Arguments = $"/i \"{installerPath}\" /passive",
+                    Arguments = $"/i \"{installerPath}\" /qn /norestart",
                     UseShellExecute = true,
                     Verb = "runas"
                 });

@@ -12,7 +12,7 @@ public sealed class HyperToolConfig
 
     public string DefaultSwitchName { get; set; } = "Default Switch";
 
-    public string VmConnectComputerName { get; set; } = Environment.MachineName;
+    public string VmConnectComputerName { get; set; } = string.Empty;
 
     public string LastKnownHostComputerName { get; set; } = Environment.MachineName;
 

@@ -1,6 +1,7 @@
 using HyperTool.Models;
 using Serilog;
 using System.IO;
+using System.Net.NetworkInformation;
 using System.Text.Json;
 
 namespace HyperTool.Services;
@@ -248,29 +249,19 @@ public sealed class ConfigService : IConfigService
         }
 
         var currentHostComputerName = Environment.MachineName.Trim();
+        var preferredVmConnectComputerName = ResolvePreferredVmConnectComputerName(currentHostComputerName);
         var normalizedVmConnectComputerName = config.VmConnectComputerName?.Trim() ?? string.Empty;
         var normalizedLastKnownHostComputerName = config.LastKnownHostComputerName?.Trim() ?? string.Empty;
 
-        if (!string.Equals(normalizedVmConnectComputerName, currentHostComputerName, StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(normalizedVmConnectComputerName)
+            || string.Equals(normalizedVmConnectComputerName, "localhost", StringComparison.OrdinalIgnoreCase))
         {
-            config.VmConnectComputerName = currentHostComputerName;
+            config.VmConnectComputerName = preferredVmConnectComputerName;
             wasUpdated = true;
-
-            if (!string.IsNullOrWhiteSpace(normalizedLastKnownHostComputerName)
-                && !string.Equals(normalizedLastKnownHostComputerName, currentHostComputerName, StringComparison.OrdinalIgnoreCase))
-            {
-                notices.Add($"Host-Computername wurde geändert ({normalizedLastKnownHostComputerName} -> {currentHostComputerName}). VmConnectComputerName wurde automatisch aktualisiert.");
-                Log.Information(
-                    "Host computer name changed from {PreviousHostComputerName} to {CurrentHostComputerName}; VmConnectComputerName updated automatically.",
-                    normalizedLastKnownHostComputerName,
-                    currentHostComputerName);
-            }
-            else
-            {
-                Log.Information(
-                    "VmConnectComputerName updated to current host computer name {CurrentHostComputerName}.",
-                    currentHostComputerName);
-            }
+            notices.Add($"VmConnectComputerName war leer/localhost und wurde auf '{preferredVmConnectComputerName}' gesetzt.");
+            Log.Information(
+                "VmConnectComputerName was empty/localhost and was set to {PreferredVmConnectComputerName}.",
+                preferredVmConnectComputerName);
         }
 
         if (!string.Equals(normalizedLastKnownHostComputerName, currentHostComputerName, StringComparison.OrdinalIgnoreCase))
@@ -546,6 +537,27 @@ public sealed class ConfigService : IConfigService
 
         var notice = notices.Count == 0 ? null : string.Join(" ", notices);
         return (config, wasUpdated, notice);
+    }
+
+    private static string ResolvePreferredVmConnectComputerName(string fallbackMachineName)
+    {
+        var machine = string.IsNullOrWhiteSpace(fallbackMachineName)
+            ? Environment.MachineName.Trim()
+            : fallbackMachineName.Trim();
+
+        try
+        {
+            var domainName = IPGlobalProperties.GetIPGlobalProperties().DomainName?.Trim() ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(domainName))
+            {
+                return $"{machine}.{domainName}";
+            }
+        }
+        catch
+        {
+        }
+
+        return machine;
     }
 
     private static bool IsSupportedUsbDeviceKey(string? key)
