@@ -2256,6 +2256,18 @@ public partial class MainViewModel : ViewModelBase
 
     private static bool IsUsbDeviceVisibleInHostList(UsbIpDeviceInfo device)
     {
+        var hasConcreteBusId = !string.IsNullOrWhiteSpace(device.BusId)
+            && !string.Equals(device.BusId.Trim(), "-", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(device.BusId.Trim(), "--", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(device.BusId.Trim(), "n/a", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(device.BusId.Trim(), "na", StringComparison.OrdinalIgnoreCase);
+
+        // Hide phantom shared remnants that keep stale instance metadata but no concrete BUSID.
+        if (device.IsShared && !hasConcreteBusId && !device.IsAttached)
+        {
+            return false;
+        }
+
         // Hide stale persisted/shared remnants when a dongle was unplugged and may later appear with a new BUSID.
         if (device.IsShared && !device.IsConnected && !device.IsAttached)
         {
