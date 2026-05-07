@@ -1,5 +1,37 @@
 # HyperTool Release Notes
 
+## v2.6.3
+
+### Highlights
+
+- Start-Updateflow in Host und Guest erweitert: bei verfügbarer installierbarer Version erscheint ein Entscheidungsdialog (Jetzt installieren/Später), auch bei minimiertem Start.
+- Optionale Runtime-Installationen wurden robuster gemacht, insbesondere für usbip-win2 im Guest.
+
+### Verbessert
+
+- Host:
+	- Start-Updateprüfung triggert jetzt einen expliziten Dialogfluss im UI.
+	- Bei minimiertem Start wird das Fenster für den Dialog temporär eingeblendet und danach wieder in den vorherigen Sichtbarkeitszustand gebracht.
+	- VMConnect-Konfiguration ergänzt: Button zum Setzen des empfohlenen Hostnamens.
+	- USB-Host-Liste blendet verwaiste Shared-Einträge ohne physisch angeschlossenes Gerät aus.
+- Guest:
+	- Start-Updateprüfung zeigt jetzt ebenfalls einen Entscheidungsdialog, auch bei minimiertem Start.
+	- UI-Thread-sicherer Dialogpfad für verzögerte Startaufgaben ergänzt.
+	- In-App-Nachinstallation von usbip-win2/WinFsp auf stille Parameter vereinheitlicht (`/VERYSILENT` bzw. `/qn /norestart`).
+- Installer (Inno Setup):
+	- Guest-Installer installiert usbip-win2 nicht mehr nur "fire-and-forget", sondern verifiziert den Erfolg und nutzt bei Bedarf winget-Fallback (inklusive `%LOCALAPPDATA%`-Pfad).
+	- Host-Installer prüft nach winget-Installationsversuch von usbipd-win den tatsächlichen Installationsstatus und verwendet ebenfalls den `%LOCALAPPDATA%`-Fallback.
+
+### Behoben
+
+- Fall behoben, in dem die optionale stille usbip-win2-Installation im Guest nicht zuverlässig abgeschlossen wurde.
+- Installationsmeldungen bei optionalen Runtimes sind jetzt konsistenter, da sie auf verifiziertem Status statt auf reinem Start des Prozesses basieren.
+
+### Doku
+
+- Hilfe-Fenster von Host und Guest inhaltlich überarbeitet (Start-Updates, Runtime-Installation, aktuelle Bedienhinweise).
+- README auf `v2.6.3` aktualisiert (Release-Stand und Runtime-Installationsverhalten).
+
 ## v2.6.1
 
 ### Highlights

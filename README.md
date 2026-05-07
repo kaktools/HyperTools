@@ -4,11 +4,11 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.6.1**
-- VMConnect-Hostname wird beim Start auf den aktuellen Rechnernamen synchronisiert (inklusive Aktualisierung nach Rechnerumbenennung).
-- Tray-Doppelklick zum Ein-/Ausblenden von Host und Guest wurde stabilisiert, besonders bei minimiertem Autostart.
-- Verbindungsfehler beim Öffnen von VMConnect behoben: ungültiger Startparameter `/fullscreen` wird nicht mehr verwendet.
-- Shutdown-Cleanup im USB-Pfad ist robuster und vermeidet störende `sc.exe`-Folgemeldungen beim Herunterfahren.
+- Version: **v2.6.3**
+- Start-Updateflow in Host und Guest erweitert: bei verfügbarem installierbarem Update erscheint ein Startdialog mit Entscheidung (Jetzt installieren/Später), auch bei minimiertem Start.
+- VMConnect-Hostname im Host kann per Button auf den empfohlenen Namen gesetzt werden, um Zertifikatswarnungen zu reduzieren.
+- Host-USB-Liste zeigt keine verwaisten Shared-Einträge mehr, wenn das physische Gerät nicht mehr vorhanden ist.
+- Optionale Laufzeiten (usbipd-win im Host, usbip-win2/WinFsp im Guest) werden stiller und zuverlässiger installiert, inklusive Verifikation und Fallback-Strategie.
 
 ## Projekte
 

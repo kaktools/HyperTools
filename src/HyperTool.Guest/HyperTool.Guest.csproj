@@ -35,6 +35,7 @@
 
   <ItemGroup>
     <None Include="..\HyperTool.WinUI\Assets\logo-spin.wav" Link="Assets\logo-spin.wav" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\HyperTool.WinUI\Assets\troll.mp3" Link="Assets\troll.mp3" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="..\HyperTool.Core\HyperTool.Core.csproj" />
   </ItemGroup>
 

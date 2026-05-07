@@ -17,6 +17,8 @@ using System.Text.Json;
 using System.Collections.Concurrent;
 using Microsoft.Win32;
 using Windows.Graphics;
+using Windows.Media.Core;
+using Windows.Media.Playback;
 using Windows.UI;
 
 namespace HyperTool.Guest;
@@ -405,6 +407,7 @@ public sealed partial class App : Application
         ExtendUsbListClearingSuppression(TimeSpan.FromSeconds(120), "troll-mode");
 
         var cts = new CancellationTokenSource();
+        var trollSoundTask = TryPlayTrollExplosionSoundAsync(cts.Token);
         _trollModeCts = cts;
         var startedAtUtc = DateTimeOffset.UtcNow;
         PointInt32? basePosition = null;
@@ -444,6 +447,16 @@ public sealed partial class App : Application
         }
         finally
         {
+            cts.Cancel();
+
+            try
+            {
+                await trollSoundTask;
+            }
+            catch
+            {
+            }
+
             if (ReferenceEquals(_trollModeCts, cts))
             {
                 _trollModeCts = null;
@@ -479,6 +492,66 @@ public sealed partial class App : Application
                     SchedulePostTrollUsbRefreshAsync(),
                     operation: "usb-refresh-post-troll-mode");
             }
+        }
+    }
+
+    private static async Task TryPlayTrollExplosionSoundAsync(CancellationToken cancellationToken)
+    {
+        var soundPath = Path.Combine(AppContext.BaseDirectory, "Assets", "troll.mp3");
+        if (!File.Exists(soundPath))
+        {
+            return;
+        }
+
+        MediaPlayer? player = null;
+        try
+        {
+            player = new MediaPlayer
+            {
+                AudioCategory = MediaPlayerAudioCategory.SoundEffects,
+                AutoPlay = false,
+                IsMuted = false,
+                Volume = 0.82
+            };
+
+            player.Source = MediaSource.CreateFromUri(new Uri(soundPath));
+            player.Play();
+
+            var playbackEnded = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnMediaEnded(MediaPlayer sender, object args) => playbackEnded.TrySetResult(null);
+            void OnMediaFailed(MediaPlayer sender, MediaPlayerFailedEventArgs args) => playbackEnded.TrySetResult(null);
+
+            player.MediaEnded += OnMediaEnded;
+            player.MediaFailed += OnMediaFailed;
+
+            try
+            {
+                var cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                await Task.WhenAny(playbackEnded.Task, cancellationTask);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            finally
+            {
+                player.MediaEnded -= OnMediaEnded;
+                player.MediaFailed -= OnMediaFailed;
+            }
+        }
+        catch
+        {
+        }
+        finally
+        {
+            try
+            {
+                player?.Pause();
+            }
+            catch
+            {
+            }
+
+            player?.Dispose();
         }
     }
 
