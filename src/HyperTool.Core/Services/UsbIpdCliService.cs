@@ -84,7 +84,7 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     public async Task<IReadOnlyList<UsbIpDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken)
     {
-        await EnsureReadyAsync(cancellationToken);
+        await EnsureReadyAsync(cancellationToken, allowElevationPrompt: false);
         var result = await RunCommandAsync(["state"], cancellationToken);
         EnsureSuccess(result, "USB-Status konnte nicht geladen werden.");
         return ParseState(result.StandardOutput);
@@ -1055,7 +1055,7 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         }
     }
 
-    private static async Task EnsureReadyAsync(CancellationToken cancellationToken)
+    private static async Task EnsureReadyAsync(CancellationToken cancellationToken, bool allowElevationPrompt = true)
     {
         if (IsSystemShutdownInProgress())
         {
@@ -1072,7 +1072,7 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
                     "usbipd-win ist nicht installiert. Bitte im HyperTool-Installer die optionale usbipd-win-Installation auswählen oder usbipd-win manuell installieren.");
             }
 
-            await EnsureUsbipdServiceRunningAsync(cancellationToken);
+            await EnsureUsbipdServiceRunningAsync(cancellationToken, allowElevationPrompt);
         }
         finally
         {
@@ -1092,7 +1092,7 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         return whereResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(whereResult.StandardOutput);
     }
 
-    private static async Task EnsureUsbipdServiceRunningAsync(CancellationToken cancellationToken)
+    private static async Task EnsureUsbipdServiceRunningAsync(CancellationToken cancellationToken, bool allowElevationPrompt)
     {
         if (IsSystemShutdownInProgress())
         {
@@ -1138,6 +1138,11 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         }
         else
         {
+            if (!allowElevationPrompt)
+            {
+                throw new InvalidOperationException("usbipd-Dienst läuft nicht.");
+            }
+
             var exitCode = await RunUtilityElevatedAsync("sc", "start usbipd", cancellationToken);
             if (exitCode != 0)
             {

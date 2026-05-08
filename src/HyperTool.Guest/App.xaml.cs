@@ -1401,6 +1401,12 @@ public sealed partial class App : Application
 
     private static void TryRemoveLegacyUsbFirewallRules()
     {
+        if (!ShouldRunLegacyUsbFirewallCleanupAtStartup())
+        {
+            GuestLogger.Info("firewall.cleanup.skipped", "Startup cleanup disabled (opt-in not set).");
+            return;
+        }
+
         try
         {
             const string cleanupScript = "Get-NetFirewallRule -DisplayName 'HyperTool Guest USB Discovery (UDP-Out)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue";
@@ -1412,7 +1418,7 @@ public sealed partial class App : Application
                     using var process = Process.Start(new ProcessStartInfo
                     {
                         FileName = "powershell.exe",
-                        Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + cleanupScript + "\"",
+                        Arguments = "-NoProfile -NonInteractive -Command \"" + cleanupScript + "\"",
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         WindowStyle = ProcessWindowStyle.Hidden
@@ -1430,6 +1436,19 @@ public sealed partial class App : Application
         {
             GuestLogger.Debug("firewall.cleanup.init_skipped", ex.Message);
         }
+    }
+
+    private static bool ShouldRunLegacyUsbFirewallCleanupAtStartup()
+    {
+        var value = Environment.GetEnvironmentVariable("HYPERTOOL_ENABLE_STARTUP_FIREWALL_CLEANUP");
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
     }
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)

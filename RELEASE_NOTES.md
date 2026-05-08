@@ -1,5 +1,35 @@
 # HyperTool Release Notes
 
+## v2.6.5
+
+### Highlights
+
+- Host-Netzwerkverwaltung deutlich erweitert: Hyper-V-Switches können direkt in der App erstellt, bearbeitet und gelöscht werden.
+- VM-Netzwerkkarten sind vollständig adaptergenau verwaltbar (erstellen, bearbeiten, löschen, Switch pro Adapter auswählen).
+- Startpfade und Installer-Verhalten wurden für verwaltete Umgebungen robuster gemacht (weniger aggressive Elevation-/Legacy-Cleanup-Aufrufe).
+
+### Verbessert
+
+- Host:
+	- Neuer Switch-Management-Bereich in den Einstellungen mit Create/Edit/Delete inklusive Sicherheitsabfrage, wenn ein Recreate des Switches nötig ist.
+	- VM-Bereich erweitert um Adapter-Aktionen (neu/bearbeiten/löschen) direkt neben dem Switch-Refresh.
+	- VM-Kontextmenüs in Hauptansicht und Tray um Adapter-CRUD ergänzt.
+	- Netzwerkdaten (Switches, aktiver Adapterzustand) werden beim Start direkt geladen.
+	- Nach Adapter-Änderungen wird die VM-Adapterliste sofort nachgezogen (kein VM-Neuauswählen nötig).
+- Startup/Installer:
+	- Startup-Elevation für Socket-Registrierung läuft nicht mehr aggressiv im Startpfad.
+	- Defendpoint-/Policy-sensitive Installer-Run-Aufrufe wurden reduziert.
+
+### Behoben
+
+- Fälle behoben, in denen Netzwerkdaten erst nach manueller Interaktion vollständig sichtbar wurden.
+- Fälle behoben, in denen neue oder geänderte VM-Netzwerkkarten erst nach VM-Neuauswahl sichtbar wurden.
+
+### Doku
+
+- README auf `v2.6.5` aktualisiert.
+- Hilfe-Fenster in Host und Guest auf den aktuellen Netzwerk-/Startstand angepasst.
+
 ## v2.6.3
 
 ### Highlights

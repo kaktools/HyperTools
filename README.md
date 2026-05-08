@@ -4,11 +4,11 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.6.3**
-- Start-Updateflow in Host und Guest erweitert: bei verfügbarem installierbarem Update erscheint ein Startdialog mit Entscheidung (Jetzt installieren/Später), auch bei minimiertem Start.
-- VMConnect-Hostname im Host kann per Button auf den empfohlenen Namen gesetzt werden, um Zertifikatswarnungen zu reduzieren.
-- Host-USB-Liste zeigt keine verwaisten Shared-Einträge mehr, wenn das physische Gerät nicht mehr vorhanden ist.
-- Optionale Laufzeiten (usbipd-win im Host, usbip-win2/WinFsp im Guest) werden stiller und zuverlässiger installiert, inklusive Verifikation und Fallback-Strategie.
+- Version: **v2.6.5**
+- Hyper-V Netzwerkverwaltung im Host erweitert: Switches erstellen/bearbeiten/löschen inkl. Recreate-Flow bei External-Änderungen.
+- VM-Netzwerkkarten sind adaptergenau verwaltbar: pro Adapter Switch wählen sowie Adapter erstellen/bearbeiten/löschen.
+- Netzwerkdaten werden beim Start direkt geladen; nach Adapter-Aktionen wird die Liste sofort aktualisiert (ohne VM-Neuauswahl).
+- Start-/Installationspfade für verwaltete Unternehmensumgebungen gehärtet (weniger aggressive Elevation/Legacy-Cleanup-Aufrufe).
 
 ## Projekte
 
@@ -24,6 +24,8 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 - VM-Aktionen: Start, Stop, Hard Off, Restart, Konsole.
 - VM löschen: per VM-Menü/Rechtsklick mit Bestätigungsdialog; entfernt die VM aus Hyper-V.
 - Netzwerk: adaptergenaues Switch-Handling (auch Multi-NIC).
+- Hyper-V Switch-Verwaltung in den Einstellungen: Switch erstellen, bearbeiten und löschen.
+- VM-Netzwerkkarten im VM-Bereich: Adapter erstellen, bearbeiten, löschen und pro Adapter gezielt mit Switch verbinden.
 - Host-Network-Details: klare Status-Chips für `Gateway` (grün) und `Default Switch` (orange), dark/light lesbar.
 - Snapshots: Baumdarstellung mit Restore/Delete/Create.
 - USB: Refresh, Share, Unshare und Detach über usbipd.

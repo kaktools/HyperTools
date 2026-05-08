@@ -2007,6 +2007,9 @@ public sealed class MainWindow : Window
 
         var switchActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         switchActions.Children.Add(CreateIconButton("⟳", "Switches neu laden", _viewModel.RefreshSwitchesCommand));
+        switchActions.Children.Add(CreateIconButton("➕", "Netzwerkkarte neu", onClick: async (_, _) => await AddVmAdapterWithPromptAsync()));
+        switchActions.Children.Add(CreateIconButton("✎", "Netzwerkkarte bearbeiten", onClick: async (_, _) => await EditVmAdapterWithPromptAsync()));
+        switchActions.Children.Add(CreateIconButton("🗑", "Netzwerkkarte löschen", onClick: async (_, _) => await RemoveVmAdapterWithPromptAsync()));
         networkStack.Children.Add(switchActions);
 
         networkStack.Children.Add(new TextBlock
@@ -2506,6 +2509,41 @@ public sealed class MainWindow : Window
         Grid.SetColumn(adapterCard, 1);
         vmGrid.Children.Add(adapterCard);
         vmStack.Children.Add(vmGrid);
+
+        var switchCard = new Border
+        {
+            BorderThickness = new Thickness(1),
+            BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush,
+            Background = Application.Current.Resources["SurfaceSoftBrush"] as Brush,
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(10)
+        };
+        var switchStack = new StackPanel { Spacing = 8 };
+        switchStack.Children.Add(new TextBlock
+        {
+            Text = "Hyper-V Switches verwalten",
+            Opacity = 0.95,
+            Foreground = Application.Current.Resources["TextMutedBrush"] as Brush
+        });
+
+        var switchCombo = CreateStyledComboBox();
+        switchCombo.MinHeight = 38;
+        switchCombo.HorizontalAlignment = HorizontalAlignment.Stretch;
+        switchCombo.ItemsSource = _viewModel.AvailableSwitches;
+        switchCombo.DisplayMemberPath = nameof(HyperVSwitchInfo.Name);
+        switchCombo.SelectedItem = _viewModel.SelectedSwitch;
+        switchCombo.SelectionChanged += (_, _) => _viewModel.SelectedSwitch = switchCombo.SelectedItem as HyperVSwitchInfo;
+        switchStack.Children.Add(switchCombo);
+
+        var switchButtonRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        switchButtonRow.Children.Add(CreateIconButton("➕", "Switch neu", onClick: async (_, _) => await CreateVmSwitchWithPromptAsync()));
+        switchButtonRow.Children.Add(CreateIconButton("✎", "Switch bearbeiten", onClick: async (_, _) => await EditVmSwitchWithPromptAsync()));
+        switchButtonRow.Children.Add(CreateIconButton("🗑", "Switch löschen", onClick: async (_, _) => await RemoveVmSwitchWithPromptAsync()));
+        switchButtonRow.Children.Add(CreateIconButton("⟳", "Switches neu laden", _viewModel.RefreshSwitchesCommand));
+        switchStack.Children.Add(switchButtonRow);
+
+        switchCard.Child = switchStack;
+        vmStack.Children.Add(switchCard);
 
         var importOptionsCard = new Border
         {
@@ -4915,6 +4953,9 @@ public sealed class MainWindow : Window
         flyout.Items.Add(new MenuFlyoutSeparator());
         flyout.Items.Add(CreateVmMenuItem("VM umbenennen", () => RenameVmWithPromptAsync(vm)));
         flyout.Items.Add(CreateVmMenuItem("CPU / RAM bearbeiten", () => EditVmComputeResourcesWithPromptAsync(vm)));
+        flyout.Items.Add(CreateVmMenuItem("Netzwerkkarte hinzufügen", () => AddVmAdapterWithPromptAsync(vm)));
+        flyout.Items.Add(CreateVmMenuItem("Netzwerkkarte bearbeiten", () => EditVmAdapterWithPromptAsync(vm)));
+        flyout.Items.Add(CreateVmMenuItem("Netzwerkkarte löschen", () => RemoveVmAdapterWithPromptAsync(vm)));
         if (vm.HasMountedIso)
         {
             flyout.Items.Add(CreateVmMenuItem("ISO auswerfen", () => UnmountIsoForVmAsync(vm)));
@@ -5388,6 +5429,9 @@ public sealed class MainWindow : Window
         flyout.Items.Add(new MenuFlyoutSeparator());
         flyout.Items.Add(CreateVmMenuItem("VM umbenennen", () => RenameVmWithPromptAsync(vm)));
         flyout.Items.Add(CreateVmMenuItem("CPU / RAM bearbeiten", () => EditVmComputeResourcesWithPromptAsync(vm)));
+        flyout.Items.Add(CreateVmMenuItem("Netzwerkkarte hinzufügen", () => AddVmAdapterWithPromptAsync(vm)));
+        flyout.Items.Add(CreateVmMenuItem("Netzwerkkarte bearbeiten", () => EditVmAdapterWithPromptAsync(vm)));
+        flyout.Items.Add(CreateVmMenuItem("Netzwerkkarte löschen", () => RemoveVmAdapterWithPromptAsync(vm)));
         if (vm.HasMountedIso)
         {
             flyout.Items.Add(CreateVmMenuItem("ISO auswerfen", () => UnmountIsoForVmAsync(vm)));
@@ -5441,6 +5485,429 @@ public sealed class MainWindow : Window
         }
 
         await EditVmComputeResourcesWithPromptAsync(_viewModel.SelectedVm);
+    }
+
+    private async Task CreateVmSwitchWithPromptAsync()
+    {
+        var hostAdapters = (await _viewModel.GetHostNetworkAdaptersWithUplinkAsync()).ToList();
+
+        var nameBox = CreateStyledTextBox(string.Empty, "Switch-Name");
+        var typeCombo = CreateStyledComboBox();
+        typeCombo.MinHeight = 38;
+        typeCombo.ItemsSource = new[] { "External", "Internal", "Private" };
+        typeCombo.SelectedIndex = 0;
+
+        var adapterCombo = CreateStyledComboBox();
+        adapterCombo.MinHeight = 38;
+        adapterCombo.ItemsSource = hostAdapters;
+        adapterCombo.DisplayMemberPath = nameof(HostNetworkAdapterInfo.AdapterName);
+        adapterCombo.SelectedItem = hostAdapters.FirstOrDefault(item => !item.IsDefaultSwitch);
+
+        var allowManagementCheck = new CheckBox
+        {
+            Content = "Host-Adapter für Management-OS freigeben",
+            IsChecked = true
+        };
+
+        void UpdateExternalVisibility()
+        {
+            var isExternal = string.Equals(typeCombo.SelectedItem as string, "External", StringComparison.OrdinalIgnoreCase);
+            adapterCombo.Visibility = isExternal ? Visibility.Visible : Visibility.Collapsed;
+            allowManagementCheck.Visibility = isExternal ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        typeCombo.SelectionChanged += (_, _) => UpdateExternalVisibility();
+        UpdateExternalVisibility();
+
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock { Text = "Name" });
+        panel.Children.Add(nameBox);
+        panel.Children.Add(new TextBlock { Text = "Typ" });
+        panel.Children.Add(typeCombo);
+        panel.Children.Add(new TextBlock { Text = "Host-Adapter (nur External)" });
+        panel.Children.Add(adapterCombo);
+        panel.Children.Add(allowManagementCheck);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Neuen Hyper-V Switch erstellen",
+            PrimaryButtonText = "Erstellen",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Primary,
+            Content = panel
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var name = nameBox.Text?.Trim() ?? string.Empty;
+        var type = typeCombo.SelectedItem as string ?? "External";
+        var adapter = (adapterCombo.SelectedItem as HostNetworkAdapterInfo)?.AdapterName;
+        var allowManagement = allowManagementCheck.IsChecked == true;
+
+        await _viewModel.CreateVmSwitchAsync(name, type, adapter, allowManagement);
+    }
+
+    private async Task EditVmSwitchWithPromptAsync()
+    {
+        var selectedSwitch = _viewModel.SelectedSwitch;
+        if (selectedSwitch is null)
+        {
+            _viewModel.PublishNotification("Bitte zuerst einen Switch auswählen.", "Info");
+            return;
+        }
+
+        var hostAdapters = (await _viewModel.GetHostNetworkAdaptersWithUplinkAsync()).ToList();
+
+        var nameBox = CreateStyledTextBox(selectedSwitch.Name, "Switch-Name");
+        var typeCombo = CreateStyledComboBox();
+        typeCombo.MinHeight = 38;
+        typeCombo.ItemsSource = new[] { "External", "Internal", "Private" };
+        typeCombo.SelectedItem = string.IsNullOrWhiteSpace(selectedSwitch.SwitchType) ? "External" : selectedSwitch.SwitchType;
+
+        var adapterCombo = CreateStyledComboBox();
+        adapterCombo.MinHeight = 38;
+        adapterCombo.ItemsSource = hostAdapters;
+        adapterCombo.DisplayMemberPath = nameof(HostNetworkAdapterInfo.AdapterName);
+        adapterCombo.SelectedItem = hostAdapters.FirstOrDefault(item =>
+            !string.IsNullOrWhiteSpace(selectedSwitch.NetAdapterInterfaceDescription)
+            && string.Equals(item.InterfaceDescription?.Trim(), selectedSwitch.NetAdapterInterfaceDescription.Trim(), StringComparison.OrdinalIgnoreCase));
+
+        var allowManagementCheck = new CheckBox
+        {
+            Content = "Host-Adapter für Management-OS freigeben",
+            IsChecked = selectedSwitch.AllowManagementOs
+        };
+
+        void UpdateExternalVisibility()
+        {
+            var isExternal = string.Equals(typeCombo.SelectedItem as string, "External", StringComparison.OrdinalIgnoreCase);
+            adapterCombo.Visibility = isExternal ? Visibility.Visible : Visibility.Collapsed;
+            allowManagementCheck.Visibility = isExternal ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        typeCombo.SelectionChanged += (_, _) => UpdateExternalVisibility();
+        UpdateExternalVisibility();
+
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock { Text = "Name" });
+        panel.Children.Add(nameBox);
+        panel.Children.Add(new TextBlock { Text = "Typ" });
+        panel.Children.Add(typeCombo);
+        panel.Children.Add(new TextBlock { Text = "Host-Adapter (nur External)" });
+        panel.Children.Add(adapterCombo);
+        panel.Children.Add(allowManagementCheck);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Hyper-V Switch bearbeiten",
+            PrimaryButtonText = "Speichern",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Primary,
+            Content = panel
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var newName = nameBox.Text?.Trim() ?? string.Empty;
+        var newType = typeCombo.SelectedItem as string ?? selectedSwitch.SwitchType;
+        var selectedAdapter = adapterCombo.SelectedItem as HostNetworkAdapterInfo;
+        var newAdapterName = selectedAdapter?.AdapterName;
+        var allowManagement = allowManagementCheck.IsChecked == true;
+
+        var typeChanged = !string.Equals(selectedSwitch.SwitchType, newType, StringComparison.OrdinalIgnoreCase);
+        var adapterChanged = string.Equals(newType, "External", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(selectedSwitch.NetAdapterInterfaceDescription?.Trim(), selectedAdapter?.InterfaceDescription?.Trim(), StringComparison.OrdinalIgnoreCase);
+        var managementChanged = string.Equals(newType, "External", StringComparison.OrdinalIgnoreCase)
+            && selectedSwitch.AllowManagementOs != allowManagement;
+        var requiresRecreate = typeChanged || adapterChanged || managementChanged;
+
+        if (requiresRecreate)
+        {
+            var recreateDialog = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = "Sicherheitsabfrage: Switch wird neu erstellt",
+                Content = "Diese Änderung erfordert ein Recreate des Switches. Verbundene VM-Adapter werden kurz getrennt und danach wieder verbunden. Fortfahren?",
+                PrimaryButtonText = "Ja, fortfahren",
+                CloseButtonText = "Abbrechen",
+                DefaultButton = ContentDialogButton.Close
+            };
+
+            var recreateResult = await recreateDialog.ShowAsync();
+            if (recreateResult != ContentDialogResult.Primary)
+            {
+                return;
+            }
+        }
+
+        await _viewModel.EditVmSwitchAsync(selectedSwitch.Name, newName, newType, newAdapterName, allowManagement);
+    }
+
+    private async Task RemoveVmSwitchWithPromptAsync()
+    {
+        var selectedSwitch = _viewModel.SelectedSwitch;
+        if (selectedSwitch is null)
+        {
+            _viewModel.PublishNotification("Bitte zuerst einen Switch auswählen.", "Info");
+            return;
+        }
+
+        var forceCheck = new CheckBox
+        {
+            Content = "Verbundene VM-Adapter vorher zwangsweise trennen",
+            IsChecked = true
+        };
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Switch löschen",
+            Content = new StackPanel
+            {
+                Spacing = 8,
+                Children =
+                {
+                    new TextBlock { Text = $"Soll der Switch '{selectedSwitch.Name}' wirklich gelöscht werden?", TextWrapping = TextWrapping.Wrap },
+                    forceCheck
+                }
+            },
+            PrimaryButtonText = "Löschen",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Close
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await _viewModel.RemoveVmSwitchAsync(selectedSwitch.Name, forceCheck.IsChecked == true);
+    }
+
+    private async Task AddVmAdapterWithPromptAsync(VmDefinition? vm = null)
+    {
+        if (vm is not null)
+        {
+            _viewModel.SelectedVm = vm;
+            _viewModel.SelectedVmForConfig = vm;
+            await _viewModel.RefreshVmStatusCommand.ExecuteAsync(null);
+        }
+
+        if (_viewModel.SelectedVm is null)
+        {
+            _viewModel.PublishNotification("Bitte zuerst eine VM auswählen.", "Info");
+            return;
+        }
+
+        var adapterNameBox = CreateStyledTextBox(string.Empty, "z. B. NIC-2");
+        var switchCombo = CreateStyledComboBox();
+        switchCombo.MinHeight = 38;
+        var switchOptions = new List<string> { "Nicht verbunden" };
+        switchOptions.AddRange(_viewModel.AvailableSwitches.Select(item => item.Name).Where(name => !string.IsNullOrWhiteSpace(name)));
+        switchCombo.ItemsSource = switchOptions;
+        switchCombo.SelectedIndex = 0;
+
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock { Text = "Adaptername" });
+        panel.Children.Add(adapterNameBox);
+        panel.Children.Add(new TextBlock { Text = "Switch" });
+        panel.Children.Add(switchCombo);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "VM-Netzwerkkarte anlegen",
+            PrimaryButtonText = "Anlegen",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Primary,
+            Content = panel
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var adapterName = adapterNameBox.Text?.Trim() ?? string.Empty;
+        var selectedSwitch = switchCombo.SelectedItem as string;
+        var switchName = string.Equals(selectedSwitch, "Nicht verbunden", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : selectedSwitch;
+
+        await _viewModel.AddVmNetworkAdapterToSelectedVmAsync(adapterName, switchName);
+    }
+
+    private async Task EditVmAdapterWithPromptAsync(VmDefinition? vm = null)
+    {
+        if (vm is not null)
+        {
+            _viewModel.SelectedVm = vm;
+            _viewModel.SelectedVmForConfig = vm;
+            await _viewModel.RefreshVmStatusCommand.ExecuteAsync(null);
+        }
+
+        if (_viewModel.SelectedVm is null)
+        {
+            _viewModel.PublishNotification("Bitte zuerst eine VM auswählen.", "Info");
+            return;
+        }
+
+        if (_viewModel.AvailableVmNetworkAdapters.Count == 0)
+        {
+            _viewModel.PublishNotification("Keine Adapter zum Bearbeiten vorhanden.", "Info");
+            return;
+        }
+
+        var adapterCombo = CreateStyledComboBox();
+        adapterCombo.MinHeight = 38;
+        adapterCombo.ItemsSource = _viewModel.AvailableVmNetworkAdapters.ToList();
+        adapterCombo.DisplayMemberPath = nameof(HyperVVmNetworkAdapterInfo.DisplayName);
+        adapterCombo.SelectedItem = _viewModel.SelectedVmNetworkAdapter ?? _viewModel.AvailableVmNetworkAdapters.FirstOrDefault();
+
+        var newNameBox = CreateStyledTextBox(string.Empty, "Neuer Name (optional)");
+
+        var switchCombo = CreateStyledComboBox();
+        switchCombo.MinHeight = 38;
+        var switchOptions = new List<string> { "Nicht verbunden" };
+        switchOptions.AddRange(_viewModel.AvailableSwitches.Select(item => item.Name).Where(name => !string.IsNullOrWhiteSpace(name)));
+        switchCombo.ItemsSource = switchOptions;
+
+        var disconnectCheck = new CheckBox
+        {
+            Content = "Adapter vom Switch trennen",
+            IsChecked = false
+        };
+
+        void SyncSelection()
+        {
+            var adapter = adapterCombo.SelectedItem as HyperVVmNetworkAdapterInfo;
+            if (adapter is null)
+            {
+                return;
+            }
+
+            newNameBox.Text = adapter.Name;
+            var activeSwitch = string.IsNullOrWhiteSpace(adapter.SwitchName) ? "Nicht verbunden" : adapter.SwitchName;
+            switchCombo.SelectedItem = switchOptions.FirstOrDefault(item => string.Equals(item, activeSwitch, StringComparison.OrdinalIgnoreCase)) ?? "Nicht verbunden";
+        }
+
+        adapterCombo.SelectionChanged += (_, _) => SyncSelection();
+        SyncSelection();
+
+        disconnectCheck.Checked += (_, _) => switchCombo.IsEnabled = false;
+        disconnectCheck.Unchecked += (_, _) => switchCombo.IsEnabled = true;
+
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock { Text = "Adapter" });
+        panel.Children.Add(adapterCombo);
+        panel.Children.Add(new TextBlock { Text = "Name" });
+        panel.Children.Add(newNameBox);
+        panel.Children.Add(new TextBlock { Text = "Switch" });
+        panel.Children.Add(switchCombo);
+        panel.Children.Add(disconnectCheck);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "VM-Netzwerkkarte bearbeiten",
+            PrimaryButtonText = "Speichern",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Primary,
+            Content = panel
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var selectedAdapter = adapterCombo.SelectedItem as HyperVVmNetworkAdapterInfo;
+        if (selectedAdapter is null)
+        {
+            return;
+        }
+
+        var newName = newNameBox.Text?.Trim();
+        var selectedSwitch = switchCombo.SelectedItem as string;
+        var disconnect = disconnectCheck.IsChecked == true;
+        var switchName = string.Equals(selectedSwitch, "Nicht verbunden", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : selectedSwitch;
+
+        await _viewModel.EditVmNetworkAdapterOnSelectedVmAsync(selectedAdapter.Name, newName, switchName, disconnect);
+    }
+
+    private async Task RemoveVmAdapterWithPromptAsync(VmDefinition? vm = null)
+    {
+        if (vm is not null)
+        {
+            _viewModel.SelectedVm = vm;
+            _viewModel.SelectedVmForConfig = vm;
+            await _viewModel.RefreshVmStatusCommand.ExecuteAsync(null);
+        }
+
+        if (_viewModel.SelectedVm is null)
+        {
+            _viewModel.PublishNotification("Bitte zuerst eine VM auswählen.", "Info");
+            return;
+        }
+
+        if (_viewModel.AvailableVmNetworkAdapters.Count == 0)
+        {
+            _viewModel.PublishNotification("Keine Adapter zum Löschen vorhanden.", "Info");
+            return;
+        }
+
+        var adapterCombo = CreateStyledComboBox();
+        adapterCombo.MinHeight = 38;
+        adapterCombo.ItemsSource = _viewModel.AvailableVmNetworkAdapters.ToList();
+        adapterCombo.DisplayMemberPath = nameof(HyperVVmNetworkAdapterInfo.DisplayName);
+        adapterCombo.SelectedItem = _viewModel.SelectedVmNetworkAdapter ?? _viewModel.AvailableVmNetworkAdapters.FirstOrDefault();
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "VM-Netzwerkkarte löschen",
+            Content = new StackPanel
+            {
+                Spacing = 8,
+                Children =
+                {
+                    new TextBlock { Text = "Zu löschende Netzwerkkarte", Opacity = 0.9 },
+                    adapterCombo
+                }
+            },
+            PrimaryButtonText = "Löschen",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Close
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var selectedAdapter = adapterCombo.SelectedItem as HyperVVmNetworkAdapterInfo;
+        if (selectedAdapter is null)
+        {
+            return;
+        }
+
+        await _viewModel.RemoveVmNetworkAdapterFromSelectedVmAsync(selectedAdapter.Name);
     }
 
     private async Task RenameVmWithPromptAsync(VmDefinition vm)
@@ -6630,7 +7097,7 @@ public sealed class MainWindow : Window
             "$shell=New-Object -ComObject WScript.Shell; " +
             $"$lnk=$shell.CreateShortcut('{shortcutPath.Replace("'", "''")}'); " +
             "$lnk.TargetPath='powershell.exe'; " +
-            $"$lnk.Arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"Start-VM -Name ''' + '{vmName.Replace("'", "''")}' + ''' -Confirm:$false\"'; " +
+            $"$lnk.Arguments='-NoProfile -WindowStyle Hidden -Command \"Start-VM -Name ''' + '{vmName.Replace("'", "''")}' + ''' -Confirm:$false\"'; " +
             "$lnk.WorkingDirectory=$env:SystemRoot; " +
             "$lnk.IconLocation=$env:SystemRoot + '\\\\System32\\\\shell32.dll,25'; " +
             $"$lnk.Description='HyperTool Schnellstart für VM {displayLabel.Replace("'", "''")}'; " +
@@ -6646,8 +7113,6 @@ public sealed class MainWindow : Window
 
         psi.ArgumentList.Add("-NoProfile");
         psi.ArgumentList.Add("-NonInteractive");
-        psi.ArgumentList.Add("-ExecutionPolicy");
-        psi.ArgumentList.Add("Bypass");
         psi.ArgumentList.Add("-Command");
         psi.ArgumentList.Add(ps);
 

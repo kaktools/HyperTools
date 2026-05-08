@@ -32,7 +32,17 @@ public interface IHyperVService
 
     Task<IReadOnlyList<HyperVSwitchInfo>> GetVmSwitchesAsync(CancellationToken cancellationToken);
 
+    Task CreateVmSwitchAsync(string switchName, string switchType, string? netAdapterName, bool allowManagementOs, CancellationToken cancellationToken);
+
+    Task UpdateVmSwitchAsync(string currentSwitchName, string newSwitchName, string switchType, string? netAdapterName, bool allowManagementOs, CancellationToken cancellationToken);
+
+    Task RemoveVmSwitchAsync(string switchName, bool force, CancellationToken cancellationToken);
+
     Task<IReadOnlyList<HyperVVmNetworkAdapterInfo>> GetVmNetworkAdaptersAsync(string vmName, CancellationToken cancellationToken);
+
+    Task AddVmNetworkAdapterAsync(string vmName, string adapterName, string? switchName, CancellationToken cancellationToken);
+
+    Task RemoveVmNetworkAdapterAsync(string vmName, string adapterName, CancellationToken cancellationToken);
 
     Task<string?> GetVmCurrentSwitchNameAsync(string vmName, CancellationToken cancellationToken);
 

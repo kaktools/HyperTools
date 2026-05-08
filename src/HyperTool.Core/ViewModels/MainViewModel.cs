@@ -220,6 +220,8 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     private string _hostNetworkProfileDisplayText = "Host-Netzprofil: Unbekannt";
 
+    private bool _hostNetworkProfileLoadedOnce;
+
     [ObservableProperty]
     private bool _hasPendingConfigChanges;
 
@@ -1023,6 +1025,7 @@ public partial class MainViewModel : ViewModelBase
         _ = PersistSelectedVmAsync(value.Name);
 
         _ = EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+
         _ = RefreshSelectedVmStatusAfterSelectionAsync(value.Name);
         _ = LoadCheckpointsAsync();
     }
@@ -1049,12 +1052,16 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task HandleNetworkTabActivatedAsync()
     {
-        await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
-
         if (!AreSwitchesLoaded)
         {
             await RefreshSwitchesAsync();
-            return;
+        }
+
+        await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+
+        if (!_hostNetworkProfileLoadedOnce)
+        {
+            await RefreshHostNetworkProfileAsync();
         }
 
         SyncSelectedSwitchWithCurrentVm(showNotificationOnMissingSwitch: false);
@@ -1355,6 +1362,7 @@ public partial class MainViewModel : ViewModelBase
         await RefreshUsbRuntimeAvailabilityAsync();
         await LoadVmsFromHyperVWithRetryAsync();
         await RefreshSwitchesAsync();
+        await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
         await RefreshHostNetworkProfileAsync();
         await RefreshVmStatusAsync();
         await LoadCheckpointsAsync();
@@ -1810,6 +1818,7 @@ public partial class MainViewModel : ViewModelBase
         {
             var profileCategory = await _hyperVService.GetHostNetworkProfileCategoryAsync(_lifetimeCancellation.Token);
             ApplyHostNetworkProfileCategory(profileCategory);
+            _hostNetworkProfileLoadedOnce = true;
         }
         catch (OperationCanceledException)
         {
@@ -4513,6 +4522,173 @@ public partial class MainViewModel : ViewModelBase
         await LoadVmAdaptersForConfigAsync(SelectedVmForConfig);
         await RefreshVmStatusAsync();
         NotifyTrayStateChanged();
+    }
+
+    public async Task CreateVmSwitchAsync(string switchName, string switchType, string? netAdapterName, bool allowManagementOs)
+    {
+        var normalizedName = (switchName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedName))
+        {
+            AddNotification("Switch erstellen abgebrochen: Name fehlt.", "Warning");
+            return;
+        }
+
+        await ExecuteBusyActionAsync($"Switch '{normalizedName}' wird erstellt...", async token =>
+        {
+            await _hyperVService.CreateVmSwitchAsync(normalizedName, switchType, netAdapterName, allowManagementOs, token);
+            AddNotification($"Switch '{normalizedName}' wurde erstellt.", "Success");
+        });
+
+        await RefreshSwitchesAsync();
+        await RefreshVmStatusAsync();
+    }
+
+    public async Task EditVmSwitchAsync(string currentSwitchName, string newSwitchName, string switchType, string? netAdapterName, bool allowManagementOs)
+    {
+        var normalizedCurrent = (currentSwitchName ?? string.Empty).Trim();
+        var normalizedNew = (newSwitchName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedCurrent) || string.IsNullOrWhiteSpace(normalizedNew))
+        {
+            AddNotification("Switch bearbeiten abgebrochen: Name fehlt.", "Warning");
+            return;
+        }
+
+        await ExecuteBusyActionAsync($"Switch '{normalizedCurrent}' wird aktualisiert...", async token =>
+        {
+            await _hyperVService.UpdateVmSwitchAsync(normalizedCurrent, normalizedNew, switchType, netAdapterName, allowManagementOs, token);
+            AddNotification($"Switch '{normalizedCurrent}' wurde aktualisiert.", "Success");
+        });
+
+        await RefreshSwitchesAsync();
+        await RefreshVmStatusAsync();
+    }
+
+    public async Task RemoveVmSwitchAsync(string switchName, bool force)
+    {
+        var normalizedName = (switchName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedName))
+        {
+            AddNotification("Switch löschen abgebrochen: Name fehlt.", "Warning");
+            return;
+        }
+
+        await ExecuteBusyActionAsync($"Switch '{normalizedName}' wird gelöscht...", async token =>
+        {
+            await _hyperVService.RemoveVmSwitchAsync(normalizedName, force, token);
+            AddNotification($"Switch '{normalizedName}' wurde gelöscht.", "Success");
+        });
+
+        await RefreshSwitchesAsync();
+        await RefreshVmStatusAsync();
+    }
+
+    public async Task AddVmNetworkAdapterToSelectedVmAsync(string adapterName, string? switchName)
+    {
+        if (SelectedVm is null)
+        {
+            AddNotification("Bitte zuerst eine VM auswählen.", "Warning");
+            return;
+        }
+
+        var normalizedAdapter = (adapterName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedAdapter))
+        {
+            AddNotification("Adapter anlegen abgebrochen: Name fehlt.", "Warning");
+            return;
+        }
+
+        if (AvailableVmNetworkAdapters.Any(item => string.Equals(item.Name, normalizedAdapter, StringComparison.OrdinalIgnoreCase)))
+        {
+            AddNotification($"Adapter '{normalizedAdapter}' existiert bereits auf der VM.", "Warning");
+            return;
+        }
+
+        await ExecuteBusyActionAsync($"Adapter '{normalizedAdapter}' wird erstellt...", async token =>
+        {
+            await _hyperVService.AddVmNetworkAdapterAsync(SelectedVm.Name, normalizedAdapter, switchName, token);
+            AddNotification($"Adapter '{normalizedAdapter}' wurde erstellt.", "Success");
+        });
+
+        await RefreshVmStatusAsync();
+        await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+        await LoadVmAdaptersForConfigAsync(SelectedVmForConfig ?? SelectedVm);
+    }
+
+    public async Task EditVmNetworkAdapterOnSelectedVmAsync(string currentAdapterName, string? newAdapterName, string? targetSwitchName, bool disconnect)
+    {
+        if (SelectedVm is null)
+        {
+            AddNotification("Bitte zuerst eine VM auswählen.", "Warning");
+            return;
+        }
+
+        var currentName = (currentAdapterName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(currentName))
+        {
+            AddNotification("Adapter bearbeiten abgebrochen: Name fehlt.", "Warning");
+            return;
+        }
+
+        var renameTarget = (newAdapterName ?? string.Empty).Trim();
+
+        await ExecuteBusyActionAsync($"Adapter '{currentName}' wird aktualisiert...", async token =>
+        {
+            if (!string.IsNullOrWhiteSpace(renameTarget)
+                && !string.Equals(currentName, renameTarget, StringComparison.OrdinalIgnoreCase))
+            {
+                await _hyperVService.RenameVmNetworkAdapterAsync(SelectedVm.Name, currentName, renameTarget, token);
+                currentName = renameTarget;
+            }
+
+            if (disconnect)
+            {
+                await _hyperVService.DisconnectVmNetworkAdapterAsync(SelectedVm.Name, currentName, token);
+            }
+            else if (!string.IsNullOrWhiteSpace(targetSwitchName))
+            {
+                await _hyperVService.ConnectVmNetworkAdapterAsync(SelectedVm.Name, targetSwitchName.Trim(), currentName, token);
+
+                if (ShouldAutoRestartHnsAfterConnect(targetSwitchName.Trim()))
+                {
+                    var hnsResult = await _hnsService.RestartHnsElevatedAsync(token);
+                    AddNotification(
+                        hnsResult.Success ? hnsResult.Message : $"HNS Neustart fehlgeschlagen: {hnsResult.Message}",
+                        hnsResult.Success ? "Success" : "Error");
+                }
+            }
+
+            AddNotification($"Adapter '{currentName}' wurde aktualisiert.", "Success");
+        });
+
+        await RefreshVmStatusAsync();
+        await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+        await LoadVmAdaptersForConfigAsync(SelectedVmForConfig ?? SelectedVm);
+    }
+
+    public async Task RemoveVmNetworkAdapterFromSelectedVmAsync(string adapterName)
+    {
+        if (SelectedVm is null)
+        {
+            AddNotification("Bitte zuerst eine VM auswählen.", "Warning");
+            return;
+        }
+
+        var normalizedAdapter = (adapterName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedAdapter))
+        {
+            AddNotification("Adapter löschen abgebrochen: Name fehlt.", "Warning");
+            return;
+        }
+
+        await ExecuteBusyActionAsync($"Adapter '{normalizedAdapter}' wird gelöscht...", async token =>
+        {
+            await _hyperVService.RemoveVmNetworkAdapterAsync(SelectedVm.Name, normalizedAdapter, token);
+            AddNotification($"Adapter '{normalizedAdapter}' wurde gelöscht.", "Success");
+        });
+
+        await RefreshVmStatusAsync();
+        await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+        await LoadVmAdaptersForConfigAsync(SelectedVmForConfig ?? SelectedVm);
     }
 
     private async Task SaveConfigAsync()

@@ -269,6 +269,10 @@ public sealed partial class App : Application
 
             var logPath = InitializeLogging(configResult.Config.Ui.DebugLoggingEnabled);
             Log.Information("Logging initialized at {LogPath}", logPath);
+            Log.Information(
+                "Startup marker: BuildProfile=FullNetworkCrudEnabled; ExePath={ExePath}; ProcessPath={ProcessPath}",
+                Process.GetCurrentProcess().MainModule?.FileName ?? "<unknown>",
+                Environment.ProcessPath ?? "<unknown>");
             Log.Debug("Host configuration loaded. ConfigPath={ConfigPath}; DebugLoggingEnabled={DebugLoggingEnabled}", configResult.ConfigPath, configResult.Config.Ui.DebugLoggingEnabled);
             _hostHyperVMonitorEnabled = configResult.Config.Ui.DebugLoggingEnabled;
             TryRemoveLegacyUsbFirewallRules();
@@ -1732,6 +1736,12 @@ public sealed partial class App : Application
 
     private static void TryRemoveLegacyUsbFirewallRules()
     {
+        if (!ShouldRunLegacyUsbFirewallCleanupAtStartup())
+        {
+            Log.Information("Skipping legacy USB firewall cleanup at startup (opt-in disabled).");
+            return;
+        }
+
         try
         {
             var cleanupScript = "$legacyNames=@('HyperTool USB Discovery (UDP-In)','HyperTool USB Discovery (UDP-Out)','HyperTool Guest USB Discovery (UDP-Out)'); foreach($n in $legacyNames){ Get-NetFirewallRule -DisplayName $n -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue }; Get-NetFirewallRule -Direction Inbound -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match '(?i)usbipd' } | Remove-NetFirewallRule -ErrorAction SilentlyContinue";
@@ -1743,7 +1753,7 @@ public sealed partial class App : Application
                     using var process = Process.Start(new ProcessStartInfo
                     {
                         FileName = "powershell.exe",
-                        Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + cleanupScript + "\"",
+                        Arguments = "-NoProfile -NonInteractive -Command \"" + cleanupScript + "\"",
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         WindowStyle = ProcessWindowStyle.Hidden
@@ -1761,6 +1771,19 @@ public sealed partial class App : Application
         {
             Log.Debug(ex, "Legacy firewall cleanup initialization skipped.");
         }
+    }
+
+    private static bool ShouldRunLegacyUsbFirewallCleanupAtStartup()
+    {
+        var value = Environment.GetEnvironmentVariable("HYPERTOOL_ENABLE_STARTUP_FIREWALL_CLEANUP");
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
     }
 
     private void TryInitializeTray(MainWindow mainWindow, MainViewModel mainViewModel)
@@ -3575,10 +3598,11 @@ public sealed partial class App : Application
 
         Log.Warning("Missing Hyper-V socket registry entries detected at startup: {ServiceIds}", string.Join(", ", missingServiceIds));
 
-        // Startup must always attempt to repair missing Hyper-V socket registrations, including UAC prompt if needed.
-        if (!TryRegisterSharedFolderSocketServiceElevated(allowPrompt: true))
+        // Never force UAC/elevation during startup. Some environments block child elevation
+        // (CreateProcess code 5), which can prevent reliable app launch.
+        if (!TryRegisterSharedFolderSocketServiceElevated(allowPrompt: false))
         {
-            Log.Warning("Could not auto-register missing Hyper-V socket registry entries at startup.");
+            Log.Warning("Could not auto-register missing Hyper-V socket registry entries at startup (prompt suppressed).");
             return;
         }
 
@@ -4177,19 +4201,26 @@ public sealed partial class App : Application
 
         _hyperVSocketRegistrationPromptIssued = true;
 
-        string? scriptPath = null;
-
         try
         {
-            scriptPath = Path.Combine(Path.GetTempPath(), $"HyperTool.RegisterHyperVSocket.{Guid.NewGuid():N}.ps1");
-            File.WriteAllText(scriptPath, BuildElevatedHyperVSocketRegistrationScript(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            var currentExePath = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(currentExePath) || !File.Exists(currentExePath))
+            {
+                Log.Warning("Elevated shared-folder registration helper could not resolve current executable path.");
+                return false;
+            }
+
+            var workingDirectory = Path.GetDirectoryName(currentExePath);
 
             using var process = Process.Start(new ProcessStartInfo
             {
-                FileName = "powershell.exe",
-                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+                FileName = currentExePath,
+                Arguments = "--register-sharedfolder-socket",
                 UseShellExecute = true,
-                Verb = "runas"
+                Verb = "runas",
+                WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
+                    ? Environment.CurrentDirectory
+                    : workingDirectory
             });
 
             if (process is null)
@@ -4212,23 +4243,15 @@ public sealed partial class App : Application
             Log.Warning("UAC prompt for shared-folder socket registration was cancelled.");
             return false;
         }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 5)
+        {
+            Log.Warning(ex, "Elevated shared-folder registration helper could not be started (CreateProcess access denied).");
+            return false;
+        }
         catch (Exception ex)
         {
             Log.Warning(ex, "Failed to start elevated shared-folder registration helper.");
             return false;
-        }
-        finally
-        {
-            if (!string.IsNullOrWhiteSpace(scriptPath))
-            {
-                try
-                {
-                    File.Delete(scriptPath);
-                }
-                catch
-                {
-                }
-            }
         }
     }
 
@@ -4259,7 +4282,7 @@ public sealed partial class App : Application
             var psi = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
-                Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"Restart-Service hns -Force -ErrorAction Stop\"",
+                Arguments = "-NoProfile -NonInteractive -Command \"Restart-Service hns -Force -ErrorAction Stop\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true,

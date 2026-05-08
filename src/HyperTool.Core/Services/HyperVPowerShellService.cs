@@ -432,7 +432,7 @@ public sealed class HyperVPowerShellService : IHyperVService
             var startInfo = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
-                Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + tempScriptPath + "\"",
+                        Arguments = "-NoProfile -NonInteractive -File \"" + tempScriptPath + "\"",
                 UseShellExecute = true,
                 Verb = "runas",
                 WindowStyle = ProcessWindowStyle.Hidden
@@ -493,15 +493,180 @@ public sealed class HyperVPowerShellService : IHyperVService
     public async Task<IReadOnlyList<HyperVSwitchInfo>> GetVmSwitchesAsync(CancellationToken cancellationToken)
     {
         const string script = """
-            @(Get-VMSwitch | Select-Object Name, SwitchType) | ConvertTo-Json -Depth 3 -Compress
+            @(
+                Get-VMSwitch | ForEach-Object {
+                    [pscustomobject]@{
+                        Name = if ($null -ne $_.Name) { $_.Name } else { '' }
+                        SwitchType = if ($null -ne $_.SwitchType) { $_.SwitchType.ToString() } else { '' }
+                        NetAdapterInterfaceDescription = if ($null -ne $_.NetAdapterInterfaceDescription) { $_.NetAdapterInterfaceDescription } else { '' }
+                        AllowManagementOS = if ($null -ne $_.AllowManagementOS) { [bool]$_.AllowManagementOS } else { $true }
+                    }
+                }
+            ) | ConvertTo-Json -Depth 4 -Compress
             """;
 
         var rows = await InvokeJsonArrayAsync(script, cancellationToken);
         return rows.Select(row => new HyperVSwitchInfo
         {
             Name = GetString(row, "Name"),
-            SwitchType = GetString(row, "SwitchType")
+            SwitchType = GetString(row, "SwitchType"),
+            NetAdapterInterfaceDescription = GetString(row, "NetAdapterInterfaceDescription"),
+            AllowManagementOs = GetBoolean(row, "AllowManagementOS")
         }).ToList();
+    }
+
+    public Task CreateVmSwitchAsync(string switchName, string switchType, string? netAdapterName, bool allowManagementOs, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(switchName))
+        {
+            throw new ArgumentException("Switch-Name darf nicht leer sein.", nameof(switchName));
+        }
+
+        var normalizedType = NormalizeSwitchType(switchType);
+        var normalizedName = switchName.Trim();
+        var normalizedAdapter = (netAdapterName ?? string.Empty).Trim();
+
+        string script;
+        if (string.Equals(normalizedType, "External", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(normalizedAdapter))
+            {
+                throw new ArgumentException("Für einen External-Switch ist ein Host-Adapter erforderlich.", nameof(netAdapterName));
+            }
+
+            script =
+                "$switchName = " + ToPsSingleQuoted(normalizedName) + "; " +
+                "$netAdapterName = " + ToPsSingleQuoted(normalizedAdapter) + "; " +
+                "$allowManagement = " + (allowManagementOs ? "$true" : "$false") + "; " +
+                "$existing = Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue; " +
+                "if ($null -ne $existing) { throw \"Ein Switch mit diesem Namen existiert bereits.\" }; " +
+                "$adapter = Get-NetAdapter -Name $netAdapterName -ErrorAction SilentlyContinue | Select-Object -First 1; " +
+                "if ($null -eq $adapter) { throw \"Der gewählte Host-Adapter wurde nicht gefunden.\" }; " +
+                "New-VMSwitch -Name $switchName -SwitchType External -NetAdapterName $netAdapterName -AllowManagementOS:$allowManagement -ErrorAction Stop | Out-Null";
+        }
+        else
+        {
+            script =
+                "$switchName = " + ToPsSingleQuoted(normalizedName) + "; " +
+                "$switchType = " + ToPsSingleQuoted(normalizedType) + "; " +
+                "$existing = Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue; " +
+                "if ($null -ne $existing) { throw \"Ein Switch mit diesem Namen existiert bereits.\" }; " +
+                "New-VMSwitch -Name $switchName -SwitchType $switchType -ErrorAction Stop | Out-Null";
+        }
+
+        return InvokeNonQueryAsync(script, cancellationToken);
+    }
+
+    public Task UpdateVmSwitchAsync(string currentSwitchName, string newSwitchName, string switchType, string? netAdapterName, bool allowManagementOs, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(currentSwitchName))
+        {
+            throw new ArgumentException("Aktueller Switch-Name darf nicht leer sein.", nameof(currentSwitchName));
+        }
+
+        if (string.IsNullOrWhiteSpace(newSwitchName))
+        {
+            throw new ArgumentException("Neuer Switch-Name darf nicht leer sein.", nameof(newSwitchName));
+        }
+
+        var normalizedCurrent = currentSwitchName.Trim();
+        var normalizedNew = newSwitchName.Trim();
+        var normalizedType = NormalizeSwitchType(switchType);
+        var normalizedAdapter = (netAdapterName ?? string.Empty).Trim();
+
+        if (string.Equals(normalizedType, "External", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(normalizedAdapter))
+        {
+            throw new ArgumentException("Für einen External-Switch ist ein Host-Adapter erforderlich.", nameof(netAdapterName));
+        }
+
+        var script =
+            "$currentName = " + ToPsSingleQuoted(normalizedCurrent) + "; " +
+            "$newName = " + ToPsSingleQuoted(normalizedNew) + "; " +
+            "$targetType = " + ToPsSingleQuoted(normalizedType) + "; " +
+            "$targetAdapter = " + ToPsSingleQuoted(normalizedAdapter) + "; " +
+            "$allowManagement = " + (allowManagementOs ? "$true" : "$false") + "; " +
+            "$switch = Get-VMSwitch -Name $currentName -ErrorAction Stop; " +
+            "$currentType = if ($null -ne $switch.SwitchType) { $switch.SwitchType.ToString() } else { '' }; " +
+            "$currentAdapterDescription = if ($null -ne $switch.NetAdapterInterfaceDescription) { $switch.NetAdapterInterfaceDescription.Trim() } else { '' }; " +
+            "$targetAdapterDescription = ''; " +
+            "if ($targetType -eq 'External') { " +
+            "  $adapter = Get-NetAdapter -Name $targetAdapter -ErrorAction SilentlyContinue | Select-Object -First 1; " +
+            "  if ($null -eq $adapter) { throw 'Der gewählte Host-Adapter wurde nicht gefunden.' }; " +
+            "  $targetAdapterDescription = if ($null -ne $adapter.InterfaceDescription) { $adapter.InterfaceDescription.Trim() } else { '' }; " +
+            "}; " +
+            "$needsRecreate = ($currentType -ne $targetType); " +
+            "if (-not $needsRecreate -and $targetType -eq 'External') { " +
+            "  if ([string]::Compare($currentAdapterDescription, $targetAdapterDescription, $true) -ne 0) { $needsRecreate = $true }; " +
+            "  if ([bool]$switch.AllowManagementOS -ne $allowManagement) { $needsRecreate = $true }; " +
+            "}; " +
+            "if (-not $needsRecreate -and [string]::Compare($currentName, $newName, $true) -ne 0) { " +
+            "  $exists = Get-VMSwitch -Name $newName -ErrorAction SilentlyContinue; " +
+            "  if ($null -ne $exists) { throw 'Ein Switch mit diesem Namen existiert bereits.' }; " +
+            "  Rename-VMSwitch -Name $currentName -NewName $newName -ErrorAction Stop; " +
+            "  return; " +
+            "}; " +
+            "if (-not $needsRecreate) { return }; " +
+            "$connectedAdapters = @(Get-VMNetworkAdapter -ErrorAction SilentlyContinue | Where-Object { $_.SwitchName -ceq $currentName }); " +
+            "$adapterSnapshot = @($connectedAdapters | ForEach-Object { [pscustomobject]@{ VmName = $_.VMName; AdapterName = $_.Name } }); " +
+            "Disconnect-VMNetworkAdapter -VMNetworkAdapter $connectedAdapters -ErrorAction SilentlyContinue; " +
+            "Remove-VMSwitch -Name $currentName -Force -ErrorAction Stop; " +
+            "if ($targetType -eq 'External') { " +
+            "  New-VMSwitch -Name $newName -SwitchType External -NetAdapterName $targetAdapter -AllowManagementOS:$allowManagement -ErrorAction Stop | Out-Null; " +
+            "} else { " +
+            "  New-VMSwitch -Name $newName -SwitchType $targetType -ErrorAction Stop | Out-Null; " +
+            "}; " +
+            "foreach ($entry in $adapterSnapshot) { " +
+            "  if ($null -ne $entry -and -not [string]::IsNullOrWhiteSpace($entry.VmName)) { " +
+            "    if ([string]::IsNullOrWhiteSpace($entry.AdapterName)) { " +
+            "      Connect-VMNetworkAdapter -VMName $entry.VmName -SwitchName $newName -ErrorAction SilentlyContinue; " +
+            "    } else { " +
+            "      Connect-VMNetworkAdapter -VMName $entry.VmName -Name $entry.AdapterName -SwitchName $newName -ErrorAction SilentlyContinue; " +
+            "    } " +
+            "  } " +
+            "}";
+
+        return InvokeNonQueryAsync(script, cancellationToken);
+    }
+
+    public Task RemoveVmSwitchAsync(string switchName, bool force, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(switchName))
+        {
+            throw new ArgumentException("Switch-Name darf nicht leer sein.", nameof(switchName));
+        }
+
+        var script =
+            "$switchName = " + ToPsSingleQuoted(switchName.Trim()) + "; " +
+            "$switch = Get-VMSwitch -Name $switchName -ErrorAction Stop; " +
+            "if ($switch.Name -ceq 'Default Switch') { throw 'Der Default Switch darf nicht gelöscht werden.' }; " +
+            "$connected = @(Get-VMNetworkAdapter -ErrorAction SilentlyContinue | Where-Object { $_.SwitchName -ceq $switchName }); " +
+            "if (-not " + (force ? "$true" : "$false") + " -and $connected.Count -gt 0) { throw 'Switch ist noch mit VM-Adaptern verbunden.' }; " +
+            "if ($connected.Count -gt 0) { Disconnect-VMNetworkAdapter -VMNetworkAdapter $connected -ErrorAction SilentlyContinue }; " +
+            "Remove-VMSwitch -Name $switchName -Force -ErrorAction Stop";
+
+        return InvokeNonQueryAsync(script, cancellationToken);
+    }
+
+    private static string NormalizeSwitchType(string? switchType)
+    {
+        var normalized = (switchType ?? string.Empty).Trim();
+        if (normalized.Equals("External", StringComparison.OrdinalIgnoreCase))
+        {
+            return "External";
+        }
+
+        if (normalized.Equals("Internal", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Internal";
+        }
+
+        if (normalized.Equals("Private", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Private";
+        }
+
+        throw new ArgumentException("Ungültiger Switch-Typ. Erlaubt: External, Internal, Private.", nameof(switchType));
     }
 
     public async Task<IReadOnlyList<HyperVVmNetworkAdapterInfo>> GetVmNetworkAdaptersAsync(string vmName, CancellationToken cancellationToken)
@@ -562,6 +727,42 @@ public sealed class HyperVPowerShellService : IHyperVService
         }
 
         var script = $"Rename-VMNetworkAdapter -VMName {ToPsSingleQuoted(vmName)} -Name {ToPsSingleQuoted(adapterName)} -NewName {ToPsSingleQuoted(newAdapterName)}";
+        return InvokeNonQueryAsync(script, cancellationToken);
+    }
+
+    public Task AddVmNetworkAdapterAsync(string vmName, string adapterName, string? switchName, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(vmName))
+        {
+            throw new ArgumentException("VM-Name darf nicht leer sein.", nameof(vmName));
+        }
+
+        if (string.IsNullOrWhiteSpace(adapterName))
+        {
+            throw new ArgumentException("Adaptername darf nicht leer sein.", nameof(adapterName));
+        }
+
+        var normalizedSwitch = (switchName ?? string.Empty).Trim();
+        var script = string.IsNullOrWhiteSpace(normalizedSwitch)
+            ? $"Add-VMNetworkAdapter -VMName {ToPsSingleQuoted(vmName)} -Name {ToPsSingleQuoted(adapterName)}"
+            : $"Add-VMNetworkAdapter -VMName {ToPsSingleQuoted(vmName)} -Name {ToPsSingleQuoted(adapterName)} -SwitchName {ToPsSingleQuoted(normalizedSwitch)}";
+
+        return InvokeNonQueryAsync(script, cancellationToken);
+    }
+
+    public Task RemoveVmNetworkAdapterAsync(string vmName, string adapterName, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(vmName))
+        {
+            throw new ArgumentException("VM-Name darf nicht leer sein.", nameof(vmName));
+        }
+
+        if (string.IsNullOrWhiteSpace(adapterName))
+        {
+            throw new ArgumentException("Adaptername darf nicht leer sein.", nameof(adapterName));
+        }
+
+        var script = $"Remove-VMNetworkAdapter -VMName {ToPsSingleQuoted(vmName)} -Name {ToPsSingleQuoted(adapterName)} -Confirm:$false";
         return InvokeNonQueryAsync(script, cancellationToken);
     }
 
@@ -1477,8 +1678,6 @@ public sealed class HyperVPowerShellService : IHyperVService
 
         processStartInfo.ArgumentList.Add("-NoProfile");
         processStartInfo.ArgumentList.Add("-NonInteractive");
-        processStartInfo.ArgumentList.Add("-ExecutionPolicy");
-        processStartInfo.ArgumentList.Add("Bypass");
         processStartInfo.ArgumentList.Add("-Command");
         processStartInfo.ArgumentList.Add(wrappedScript);
         processStartInfo.StandardOutputEncoding = Encoding.UTF8;
@@ -1538,6 +1737,7 @@ public sealed class HyperVPowerShellService : IHyperVService
     private static async Task InvokePowerShellElevatedNonQueryAsync(string script, CancellationToken cancellationToken)
     {
         var statusFilePath = Path.Combine(Path.GetTempPath(), $"hypertool-netprofile-{Guid.NewGuid():N}.txt");
+        var scriptFilePath = Path.Combine(Path.GetTempPath(), $"hypertool-netprofile-{Guid.NewGuid():N}.ps1");
         var statusFilePathPs = ToPsSingleQuoted(statusFilePath);
 
         var wrappedScript =
@@ -1558,8 +1758,9 @@ public sealed class HyperVPowerShellService : IHyperVService
             "exit 1; " +
             "}";
 
-        var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(wrappedScript));
-        var args = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encodedScript}";
+        await File.WriteAllTextAsync(scriptFilePath, wrappedScript, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken);
+
+        var args = $"-NoProfile -NonInteractive -File \"{scriptFilePath}\"";
 
         try
         {
@@ -1621,6 +1822,17 @@ public sealed class HyperVPowerShellService : IHyperVService
             catch
             {
             }
+
+            try
+            {
+                if (File.Exists(scriptFilePath))
+                {
+                    File.Delete(scriptFilePath);
+                }
+            }
+            catch
+            {
+            }
         }
     }
 
@@ -1643,8 +1855,6 @@ public sealed class HyperVPowerShellService : IHyperVService
 
         processStartInfo.ArgumentList.Add("-NoProfile");
         processStartInfo.ArgumentList.Add("-NonInteractive");
-        processStartInfo.ArgumentList.Add("-ExecutionPolicy");
-        processStartInfo.ArgumentList.Add("Bypass");
         processStartInfo.ArgumentList.Add("-Command");
         processStartInfo.ArgumentList.Add(wrappedScript);
         processStartInfo.StandardOutputEncoding = Encoding.UTF8;
