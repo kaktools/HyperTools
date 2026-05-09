@@ -2317,13 +2317,30 @@ public sealed partial class App : Application
             return string.Empty;
         }
 
-        var parts = _mainViewModel.UsbDevices
+        var deviceParts = _mainViewModel.UsbDevices
             .Where(d => !string.IsNullOrWhiteSpace(d.BusId))
             .OrderBy(d => d.BusId, StringComparer.OrdinalIgnoreCase)
             .Select(d => $"{d.BusId}:{d.IsShared}:{d.IsAttached}")
             .ToArray();
 
-        return string.Join("|", parts);
+        var metadataParts = _mainViewModel.GetUsbDeviceMetadataSnapshot()
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.DeviceKey))
+            .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
+            .Select(entry =>
+                $"{entry.DeviceKey}:{entry.BlockInGuest}:{(entry.CustomName ?? string.Empty).Trim()}:{(entry.Comment ?? string.Empty).Trim()}")
+            .ToArray();
+
+        if (metadataParts.Length == 0)
+        {
+            return string.Join("|", deviceParts);
+        }
+
+        if (deviceParts.Length == 0)
+        {
+            return "meta:" + string.Join("|", metadataParts);
+        }
+
+        return string.Join("|", deviceParts) + "||meta:" + string.Join("|", metadataParts);
     }
 
     private void ProcessDiagnosticsAck(HyperVSocketDiagnosticsAck ack, bool isThemeRestart)
@@ -3738,7 +3755,23 @@ public sealed partial class App : Application
                     UsbDeviceAttachments = _mainViewModel?.GetUsbDeviceAttachmentSnapshot().ToList() ?? []
                 },
                 usbMetadataProvider: () => _mainViewModel?.GetUsbDeviceMetadataSnapshot() ?? [],
-                usbDescriptionProvider: () => _mainViewModel?.GetUsbDeviceDescriptionSnapshot() ?? []);
+                usbDescriptionProvider: () => _mainViewModel?.GetUsbDeviceDescriptionSnapshot() ?? [],
+                usbShareCommandHandler: async (request, cancellationToken) =>
+                {
+                    if (_mainViewModel is null)
+                    {
+                        return new HostUsbShareCommandResult
+                        {
+                            Success = false,
+                            AlreadyShared = false,
+                            BusId = (request.BusId ?? string.Empty).Trim(),
+                            ErrorCode = "host_not_ready",
+                            Message = "Host ist noch nicht bereit."
+                        };
+                    }
+
+                    return await _mainViewModel.EnsureUsbSharedByBusIdAsync(request, cancellationToken);
+                });
             _hostIdentityHostListener.Start();
             Log.Information(isThemeRestart
                 ? "Hyper-V socket host-identity listener restarted after theme change."
@@ -3776,7 +3809,23 @@ public sealed partial class App : Application
                     UsbDeviceAttachments = _mainViewModel?.GetUsbDeviceAttachmentSnapshot().ToList() ?? []
                 },
                 usbMetadataProvider: () => _mainViewModel?.GetUsbDeviceMetadataSnapshot() ?? [],
-                usbDescriptionProvider: () => _mainViewModel?.GetUsbDeviceDescriptionSnapshot() ?? []);
+                usbDescriptionProvider: () => _mainViewModel?.GetUsbDeviceDescriptionSnapshot() ?? [],
+                usbShareCommandHandler: async (request, cancellationToken) =>
+                {
+                    if (_mainViewModel is null)
+                    {
+                        return new HostUsbShareCommandResult
+                        {
+                            Success = false,
+                            AlreadyShared = false,
+                            BusId = (request.BusId ?? string.Empty).Trim(),
+                            ErrorCode = "host_not_ready",
+                            Message = "Host ist noch nicht bereit."
+                        };
+                    }
+
+                    return await _mainViewModel.EnsureUsbSharedByBusIdAsync(request, cancellationToken);
+                });
             _hostIdentityHostListener.Start();
             Log.Information("Hyper-V socket host-identity listener started after elevated registration helper.");
         }

@@ -39,4 +39,11 @@ public sealed class HyperVSocketHostIdentityGuestClient
     {
         return _controlChannel.FetchHostIdentityAsync(cancellationToken, forceRefresh);
     }
+
+    public Task<HostUsbShareCommandResult> EnsureHostUsbSharedAsync(
+        HostUsbShareCommandRequest request,
+        CancellationToken cancellationToken)
+    {
+        return _controlChannel.EnsureHostUsbSharedAsync(request, cancellationToken);
+    }
 }

@@ -85,9 +85,25 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
     public async Task<IReadOnlyList<UsbIpDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken)
     {
         await EnsureReadyAsync(cancellationToken, allowElevationPrompt: false);
-        var result = await RunCommandAsync(["state"], cancellationToken);
-        EnsureSuccess(result, "USB-Status konnte nicht geladen werden.");
-        return ParseState(result.StandardOutput);
+
+        // Prefer `list --json` because it typically contains the full local USB inventory
+        // (including currently unshared devices). Fall back to legacy `state` for older versions.
+        try
+        {
+            var listResult = await RunCommandAsync(["list", "--json"], cancellationToken);
+            if (listResult.ExitCode == 0)
+            {
+                var listDevices = ParseState(listResult.StandardOutput);
+                return listDevices;
+            }
+        }
+        catch
+        {
+        }
+
+        var stateResult = await RunCommandAsync(["state"], cancellationToken);
+        EnsureSuccess(stateResult, "USB-Status konnte nicht geladen werden.");
+        return ParseState(stateResult.StandardOutput);
     }
 
     public async Task<IReadOnlyList<UsbIpDeviceInfo>> GetRemoteDevicesAsync(string hostAddress, CancellationToken cancellationToken)
@@ -588,8 +604,20 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         }
 
         using var document = JsonDocument.Parse(json);
-        if (!document.RootElement.TryGetProperty("Devices", out var devicesElement)
-            || devicesElement.ValueKind != JsonValueKind.Array)
+        var root = document.RootElement;
+        JsonElement devicesElement;
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            devicesElement = root;
+        }
+        else if (root.ValueKind == JsonValueKind.Object
+                 && (TryGetPropertyIgnoreCase(root, "Devices", out devicesElement)
+                     || TryGetPropertyIgnoreCase(root, "devices", out devicesElement))
+                 && devicesElement.ValueKind == JsonValueKind.Array)
+        {
+            // parsed via object property
+        }
+        else
         {
             return [];
         }
@@ -625,7 +653,7 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     private static string GetString(JsonElement element, string propertyName)
     {
-        if (!element.TryGetProperty(propertyName, out var propertyElement))
+        if (!TryGetPropertyIgnoreCase(element, propertyName, out var propertyElement))
         {
             return string.Empty;
         }
@@ -638,6 +666,34 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
             JsonValueKind.False => "false",
             _ => string.Empty
         };
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string propertyName, out JsonElement propertyElement)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            propertyElement = default;
+            return false;
+        }
+
+        if (element.TryGetProperty(propertyName, out propertyElement))
+        {
+            return true;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            propertyElement = property.Value;
+            return true;
+        }
+
+        propertyElement = default;
+        return false;
     }
 
     private static string TryExtractHardwareId(string instanceId)

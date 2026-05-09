@@ -386,11 +386,13 @@ public sealed class ConfigService : IConfigService
                 {
                     DeviceKey = entry.DeviceKey?.Trim() ?? string.Empty,
                     CustomName = entry.CustomName?.Trim() ?? string.Empty,
-                    Comment = entry.Comment?.Trim() ?? string.Empty
+                    Comment = entry.Comment?.Trim() ?? string.Empty,
+                    BlockInGuest = entry.BlockInGuest
                 })
                 .Where(entry => !string.IsNullOrWhiteSpace(entry.DeviceKey)
                                 && (!string.IsNullOrWhiteSpace(entry.CustomName)
-                                    || !string.IsNullOrWhiteSpace(entry.Comment)))
+                                    || !string.IsNullOrWhiteSpace(entry.Comment)
+                                    || entry.BlockInGuest))
                 .Where(entry => IsSupportedUsbDeviceKey(entry.DeviceKey))
                 .GroupBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
                 .Select(group => group.First())

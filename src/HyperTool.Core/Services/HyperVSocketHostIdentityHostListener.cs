@@ -10,11 +10,13 @@ namespace HyperTool.Services;
 
 public sealed class HyperVSocketHostIdentityHostListener : IDisposable
 {
+    private const string EnsureUsbSharedCommand = "ensure-usb-shared";
     private const int MaxConcurrentClients = 24;
     private readonly Guid _serviceId;
     private readonly Func<HostFeatureAvailability>? _featureAvailabilityProvider;
     private readonly Func<IReadOnlyList<UsbDeviceMetadataEntry>>? _usbMetadataProvider;
     private readonly Func<IReadOnlyList<UsbDeviceHostDescriptionEntry>>? _usbDescriptionProvider;
+    private readonly Func<HostUsbShareCommandRequest, CancellationToken, Task<HostUsbShareCommandResult>>? _usbShareCommandHandler;
     private readonly object _snapshotSync = new();
     private HostFeatureAvailability _lastFeatureAvailability = new();
     private List<UsbDeviceMetadataEntry> _lastUsbMetadataSnapshot = [];
@@ -33,12 +35,14 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         Guid? serviceId = null,
         Func<HostFeatureAvailability>? featureAvailabilityProvider = null,
         Func<IReadOnlyList<UsbDeviceMetadataEntry>>? usbMetadataProvider = null,
-        Func<IReadOnlyList<UsbDeviceHostDescriptionEntry>>? usbDescriptionProvider = null)
+        Func<IReadOnlyList<UsbDeviceHostDescriptionEntry>>? usbDescriptionProvider = null,
+        Func<HostUsbShareCommandRequest, CancellationToken, Task<HostUsbShareCommandResult>>? usbShareCommandHandler = null)
     {
         _serviceId = serviceId ?? HyperVSocketUsbTunnelDefaults.HostIdentityServiceId;
         _featureAvailabilityProvider = featureAvailabilityProvider;
         _usbMetadataProvider = usbMetadataProvider;
         _usbDescriptionProvider = usbDescriptionProvider;
+        _usbShareCommandHandler = usbShareCommandHandler;
     }
 
     public bool IsRunning { get; private set; }
@@ -154,7 +158,7 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
                     break;
                 }
 
-                var payload = BuildIdentityPayload();
+                var payload = await BuildResponsePayloadAsync(line, cancellationToken);
                 await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
                 await writer.FlushAsync(cancellationToken);
             }
@@ -163,6 +167,124 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         {
             _clientHandlerGate.Release();
         }
+    }
+
+    private async Task<string> BuildResponsePayloadAsync(string line, CancellationToken cancellationToken)
+    {
+        var commandRequest = TryParseEnsureUsbSharedCommand(line);
+        if (commandRequest is null)
+        {
+            return BuildIdentityPayload();
+        }
+
+        if (_usbShareCommandHandler is null)
+        {
+            return BuildCommandResultPayload(
+                EnsureUsbSharedCommand,
+                new HostUsbShareCommandResult
+                {
+                    Success = false,
+                    AlreadyShared = false,
+                    BusId = (commandRequest.BusId ?? string.Empty).Trim(),
+                    ErrorCode = "unsupported",
+                    Message = "Host unterstützt Guest-initiierte USB-Freigabe nicht."
+                });
+        }
+
+        HostUsbShareCommandResult result;
+        try
+        {
+            result = await _usbShareCommandHandler(commandRequest, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            result = new HostUsbShareCommandResult
+            {
+                Success = false,
+                AlreadyShared = false,
+                BusId = (commandRequest.BusId ?? string.Empty).Trim(),
+                ErrorCode = "host_exception",
+                Message = string.IsNullOrWhiteSpace(ex.Message) ? "Host-Fehler bei USB-Freigabe." : ex.Message.Trim()
+            };
+        }
+
+        return BuildCommandResultPayload(EnsureUsbSharedCommand, result);
+    }
+
+    private static HostUsbShareCommandRequest? TryParseEnsureUsbSharedCommand(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var command = GetJsonString(doc.RootElement, "command")?.Trim();
+            if (!string.Equals(command, EnsureUsbSharedCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return new HostUsbShareCommandRequest
+            {
+                BusId = GetJsonString(doc.RootElement, "busId")?.Trim() ?? string.Empty,
+                SourceVmId = GetJsonString(doc.RootElement, "sourceVmId")?.Trim() ?? string.Empty,
+                GuestComputerName = GetJsonString(doc.RootElement, "guestComputerName")?.Trim() ?? string.Empty
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string BuildCommandResultPayload(string command, HostUsbShareCommandResult result)
+    {
+        return JsonSerializer.Serialize(new
+        {
+            type = "command-result",
+            command,
+            result = new HostUsbShareCommandResult
+            {
+                Success = result.Success,
+                AlreadyShared = result.AlreadyShared,
+                BusId = (result.BusId ?? string.Empty).Trim(),
+                ErrorCode = (result.ErrorCode ?? string.Empty).Trim(),
+                Message = (result.Message ?? string.Empty).Trim()
+            },
+            timestampUtc = DateTime.UtcNow
+        }, SerializerOptions);
+    }
+
+    private static string? GetJsonString(JsonElement root, string propertyName)
+    {
+        foreach (var property in root.EnumerateObject())
+        {
+            if (!string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return property.Value.ValueKind switch
+            {
+                JsonValueKind.String => property.Value.GetString(),
+                JsonValueKind.Null => null,
+                _ => property.Value.ToString()
+            };
+        }
+
+        return null;
     }
 
     private string BuildIdentityPayload()
@@ -234,11 +356,13 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
             {
                 DeviceKey = (entry.DeviceKey ?? string.Empty).Trim(),
                 CustomName = (entry.CustomName ?? string.Empty).Trim(),
-                Comment = (entry.Comment ?? string.Empty).Trim()
+                Comment = (entry.Comment ?? string.Empty).Trim(),
+                BlockInGuest = entry.BlockInGuest
             })
             .Where(entry => !string.IsNullOrWhiteSpace(entry.DeviceKey)
                             && (!string.IsNullOrWhiteSpace(entry.CustomName)
-                                || !string.IsNullOrWhiteSpace(entry.Comment)))
+                                || !string.IsNullOrWhiteSpace(entry.Comment)
+                                || entry.BlockInGuest))
             .ToList();
 
         featureAvailability.UsbDeviceDescriptions = usbDescriptions
@@ -328,7 +452,8 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         {
             DeviceKey = (source.DeviceKey ?? string.Empty).Trim(),
             CustomName = (source.CustomName ?? string.Empty).Trim(),
-            Comment = (source.Comment ?? string.Empty).Trim()
+            Comment = (source.Comment ?? string.Empty).Trim(),
+            BlockInGuest = source.BlockInGuest
         };
     }
 

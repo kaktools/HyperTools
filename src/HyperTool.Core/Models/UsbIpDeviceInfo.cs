@@ -26,6 +26,10 @@ public sealed class UsbIpDeviceInfo
 
     public bool IsAttachedByOtherGuest { get; set; }
 
+    public bool IsGuestConnectionBlocked { get; set; }
+
+    public bool IsAttachedInCurrentGuest { get; set; }
+
     public bool IsConnected => !string.IsNullOrWhiteSpace(InstanceId);
 
     public bool IsRemoteAvailable => !string.IsNullOrWhiteSpace(BusId)

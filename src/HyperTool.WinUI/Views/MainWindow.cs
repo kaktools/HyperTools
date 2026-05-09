@@ -3300,7 +3300,8 @@ public sealed class MainWindow : Window
         var headerGrid = new Grid { ColumnSpacing = 10, Margin = new Thickness(6, 2, 8, 2) };
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(220) });
-        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(220) });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
 
         headerGrid.Children.Add(new TextBlock
         {
@@ -3328,6 +3329,16 @@ public sealed class MainWindow : Window
         };
         Grid.SetColumn(metadataHeader, 2);
         headerGrid.Children.Add(metadataHeader);
+
+        var guestBlockHeader = new TextBlock
+        {
+            Text = "Guest-Sperre",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Opacity = 0.9,
+            TextAlignment = TextAlignment.Left
+        };
+        Grid.SetColumn(guestBlockHeader, 3);
+        headerGrid.Children.Add(guestBlockHeader);
 
         listLayout.Children.Add(headerGrid);
 
@@ -3542,12 +3553,42 @@ public sealed class MainWindow : Window
             return;
         }
 
+        var guestBlockCheckBox = FindDescendantByName<CheckBox>(templateRoot, "UsbGuestBlockCheckBox");
+
         commentBox.KeyDown -= OnUsbInlineCommentBoxKeyDown;
         commentBox.KeyDown += OnUsbInlineCommentBoxKeyDown;
         commentBox.GotFocus -= OnUsbInlineCommentBoxGotFocus;
         commentBox.GotFocus += OnUsbInlineCommentBoxGotFocus;
         commentBox.LostFocus -= OnUsbInlineCommentBoxLostFocus;
         commentBox.LostFocus += OnUsbInlineCommentBoxLostFocus;
+
+        if (guestBlockCheckBox is not null)
+        {
+            guestBlockCheckBox.Checked -= OnUsbGuestBlockInlineCheckBoxChanged;
+            guestBlockCheckBox.Checked += OnUsbGuestBlockInlineCheckBoxChanged;
+            guestBlockCheckBox.Unchecked -= OnUsbGuestBlockInlineCheckBoxChanged;
+            guestBlockCheckBox.Unchecked += OnUsbGuestBlockInlineCheckBoxChanged;
+        }
+    }
+
+    private async void OnUsbGuestBlockInlineCheckBoxChanged(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox checkBox
+            || checkBox.DataContext is not UsbIpDeviceInfo device)
+        {
+            return;
+        }
+
+        var blockInGuest = checkBox.IsChecked == true;
+        var changed = _viewModel.TryUpdateUsbMetadata(device, device.CustomName, device.CustomComment, out _, blockInGuest);
+        _viewModel.SelectedUsbDevice = device;
+
+        if (!changed)
+        {
+            return;
+        }
+
+        await NotifyGuestHostFeatureChangedAsync();
     }
 
     private sealed class UsbCommentEditSession
@@ -3835,11 +3876,13 @@ public sealed class MainWindow : Window
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width='*'/>
             <ColumnDefinition Width='220'/>
-            <ColumnDefinition Width='300'/>
+            <ColumnDefinition Width='220'/>
+            <ColumnDefinition Width='120'/>
         </Grid.ColumnDefinitions>
         <TextBlock Text='{Binding DeviceDisplayName}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center'/>
         <TextBlock Grid.Column='1' Text='{Binding ConnectedByDisplay}' Opacity='0.9' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center'/>
         <TextBox Grid.Column='2' x:Name='UsbInlineCommentBox' Height='30' PlaceholderText='Kommentar eingeben' Text='{Binding CustomComment, Mode=TwoWay}'/>
+        <CheckBox Grid.Column='3' x:Name='UsbGuestBlockCheckBox' IsChecked='{Binding IsGuestConnectionBlocked, Mode=TwoWay}' Content='Gesperrt' VerticalAlignment='Center' HorizontalAlignment='Left'/>
     </Grid>
 </DataTemplate>
 """;
@@ -4787,6 +4830,18 @@ public sealed class MainWindow : Window
             {
                 _viewModel.SelectVmFromChipCommand.Execute(currentVm);
             }
+        };
+
+        chip.DoubleTapped += async (_, _) =>
+        {
+            var currentVm = _viewModel.AvailableVms.FirstOrDefault(item => string.Equals(item.Name, vm.Name, StringComparison.OrdinalIgnoreCase));
+            if (currentVm is null)
+            {
+                return;
+            }
+
+            _viewModel.SelectVmFromChipCommand.Execute(currentVm);
+            await _viewModel.OpenConsoleByNameCommand.ExecuteAsync(currentVm.Name);
         };
 
         var flyout = new MenuFlyout();

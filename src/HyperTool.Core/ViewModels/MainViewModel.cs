@@ -262,6 +262,9 @@ public partial class MainViewModel : ViewModelBase
     private bool _selectedUsbDeviceAutoShareEnabled;
 
     [ObservableProperty]
+    private bool _selectedUsbDeviceGuestAccessBlocked;
+
+    [ObservableProperty]
     private long _resourceMonitorVersion;
 
     public ObservableCollection<VmDefinition> AvailableVms { get; } = [];
@@ -454,6 +457,7 @@ public partial class MainViewModel : ViewModelBase
     private int _lastSelectedMenuIndex;
     private bool _isHandlingMenuSelectionChange;
     private bool _suppressUsbAutoShareToggleHandling;
+    private bool _suppressUsbGuestBlockToggleHandling;
     private readonly SemaphoreSlim _usbTrayRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _vmStatusRefreshGate = new(1, 1);
     private readonly HashSet<string> _usbAutoShareDeviceKeys = new(StringComparer.OrdinalIgnoreCase);
@@ -631,7 +635,7 @@ public partial class MainViewModel : ViewModelBase
 
             var customName = (metadata.CustomName ?? string.Empty).Trim();
             var comment = (metadata.Comment ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(customName) && string.IsNullOrWhiteSpace(comment))
+            if (string.IsNullOrWhiteSpace(customName) && string.IsNullOrWhiteSpace(comment) && !metadata.BlockInGuest)
             {
                 continue;
             }
@@ -640,7 +644,8 @@ public partial class MainViewModel : ViewModelBase
             {
                 DeviceKey = deviceKey,
                 CustomName = customName,
-                Comment = comment
+                Comment = comment,
+                BlockInGuest = metadata.BlockInGuest
             };
         }
 
@@ -1146,13 +1151,16 @@ public partial class MainViewModel : ViewModelBase
         DetachUsbDeviceCommand.NotifyCanExecuteChanged();
         UnbindAllUsbDevicesCommand.NotifyCanExecuteChanged();
         _suppressUsbAutoShareToggleHandling = true;
+        _suppressUsbGuestBlockToggleHandling = true;
         try
         {
             SelectedUsbDeviceAutoShareEnabled = value is not null && IsUsbAutoShareEnabledForDevice(value);
+            SelectedUsbDeviceGuestAccessBlocked = value is not null && value.IsGuestConnectionBlocked;
         }
         finally
         {
             _suppressUsbAutoShareToggleHandling = false;
+            _suppressUsbGuestBlockToggleHandling = false;
         }
 
         NotifyTrayStateChanged();
@@ -1229,6 +1237,21 @@ public partial class MainViewModel : ViewModelBase
             && !string.IsNullOrWhiteSpace(SelectedUsbDevice.BusId))
         {
             _ = BindSelectedUsbDeviceAsync();
+        }
+    }
+
+    partial void OnSelectedUsbDeviceGuestAccessBlockedChanged(bool value)
+    {
+        if (_suppressUsbGuestBlockToggleHandling || SelectedUsbDevice is null)
+        {
+            return;
+        }
+
+        if (TryUpdateUsbMetadata(SelectedUsbDevice, SelectedUsbDevice.CustomName, SelectedUsbDevice.CustomComment, out _, value))
+        {
+            AddNotification(value
+                ? "USB-Gerät für Guest-Verbindung gesperrt."
+                : "USB-Gerät für Guest-Verbindung freigegeben.", "Info");
         }
     }
 
@@ -2965,12 +2988,14 @@ public partial class MainViewModel : ViewModelBase
                 var mergedComment = string.IsNullOrWhiteSpace(existingMetadata.Comment)
                     ? legacyMetadata.Comment
                     : existingMetadata.Comment;
+                var mergedBlockInGuest = existingMetadata.BlockInGuest || legacyMetadata.BlockInGuest;
 
                 _usbDeviceMetadataByKey[hardwareKey] = new UsbDeviceMetadataEntry
                 {
                     DeviceKey = hardwareKey,
                     CustomName = (mergedName ?? string.Empty).Trim(),
-                    Comment = (mergedComment ?? string.Empty).Trim()
+                    Comment = (mergedComment ?? string.Empty).Trim(),
+                    BlockInGuest = mergedBlockInGuest
                 };
             }
             else
@@ -2979,7 +3004,8 @@ public partial class MainViewModel : ViewModelBase
                 {
                     DeviceKey = hardwareKey,
                     CustomName = (legacyMetadata.CustomName ?? string.Empty).Trim(),
-                    Comment = (legacyMetadata.Comment ?? string.Empty).Trim()
+                    Comment = (legacyMetadata.Comment ?? string.Empty).Trim(),
+                    BlockInGuest = legacyMetadata.BlockInGuest
                 };
             }
 
@@ -3002,12 +3028,14 @@ public partial class MainViewModel : ViewModelBase
                 var mergedComment = string.IsNullOrWhiteSpace(existingMetadata.Comment)
                     ? legacyMetadata.Comment
                     : existingMetadata.Comment;
+                var mergedBlockInGuest = existingMetadata.BlockInGuest || legacyMetadata.BlockInGuest;
 
                 _usbDeviceMetadataByKey[mappedKey] = new UsbDeviceMetadataEntry
                 {
                     DeviceKey = mappedKey,
                     CustomName = (mergedName ?? string.Empty).Trim(),
-                    Comment = (mergedComment ?? string.Empty).Trim()
+                    Comment = (mergedComment ?? string.Empty).Trim(),
+                    BlockInGuest = mergedBlockInGuest
                 };
             }
             else
@@ -3016,7 +3044,8 @@ public partial class MainViewModel : ViewModelBase
                 {
                     DeviceKey = mappedKey,
                     CustomName = (legacyMetadata.CustomName ?? string.Empty).Trim(),
-                    Comment = (legacyMetadata.Comment ?? string.Empty).Trim()
+                    Comment = (legacyMetadata.Comment ?? string.Empty).Trim(),
+                    BlockInGuest = legacyMetadata.BlockInGuest
                 };
             }
 
@@ -3164,11 +3193,13 @@ public partial class MainViewModel : ViewModelBase
         {
             device.CustomName = string.Empty;
             device.CustomComment = string.Empty;
+            device.IsGuestConnectionBlocked = false;
             return;
         }
 
         device.CustomName = (metadata.CustomName ?? string.Empty).Trim();
         device.CustomComment = (metadata.Comment ?? string.Empty).Trim();
+        device.IsGuestConnectionBlocked = metadata.BlockInGuest;
     }
 
     private void PersistUsbAutoShareConfig()
@@ -3184,11 +3215,13 @@ public partial class MainViewModel : ViewModelBase
                 {
                     DeviceKey = (entry.DeviceKey ?? string.Empty).Trim(),
                     CustomName = (entry.CustomName ?? string.Empty).Trim(),
-                    Comment = (entry.Comment ?? string.Empty).Trim()
+                    Comment = (entry.Comment ?? string.Empty).Trim(),
+                    BlockInGuest = entry.BlockInGuest
                 })
                 .Where(entry => !string.IsNullOrWhiteSpace(entry.DeviceKey)
                                 && (!string.IsNullOrWhiteSpace(entry.CustomName)
-                                    || !string.IsNullOrWhiteSpace(entry.Comment)))
+                                    || !string.IsNullOrWhiteSpace(entry.Comment)
+                                    || entry.BlockInGuest))
                 .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
                 .ToList();
             configResult.Config.Usb.HardwareIdentityMigrationCompleted = _usbHardwareIdentityMigrationCompleted;
@@ -4755,11 +4788,13 @@ public partial class MainViewModel : ViewModelBase
                         {
                             DeviceKey = (entry.DeviceKey ?? string.Empty).Trim(),
                             CustomName = (entry.CustomName ?? string.Empty).Trim(),
-                            Comment = (entry.Comment ?? string.Empty).Trim()
+                            Comment = (entry.Comment ?? string.Empty).Trim(),
+                            BlockInGuest = entry.BlockInGuest
                         })
                         .Where(entry => !string.IsNullOrWhiteSpace(entry.DeviceKey)
                                         && (!string.IsNullOrWhiteSpace(entry.CustomName)
-                                            || !string.IsNullOrWhiteSpace(entry.Comment)))
+                                            || !string.IsNullOrWhiteSpace(entry.Comment)
+                                            || entry.BlockInGuest))
                         .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
                         .ToList(),
                     HardwareIdentityMigrationCompleted = _usbHardwareIdentityMigrationCompleted
@@ -4901,9 +4936,10 @@ public partial class MainViewModel : ViewModelBase
             var normalizedKey = (entry.DeviceKey ?? string.Empty).Trim();
             var normalizedName = (entry.CustomName ?? string.Empty).Trim();
             var normalizedComment = (entry.Comment ?? string.Empty).Trim();
+            var blockInGuest = entry.BlockInGuest;
 
             if (string.IsNullOrWhiteSpace(normalizedKey)
-                || (string.IsNullOrWhiteSpace(normalizedName) && string.IsNullOrWhiteSpace(normalizedComment)))
+                || (string.IsNullOrWhiteSpace(normalizedName) && string.IsNullOrWhiteSpace(normalizedComment) && !blockInGuest))
             {
                 continue;
             }
@@ -4912,7 +4948,8 @@ public partial class MainViewModel : ViewModelBase
             {
                 DeviceKey = normalizedKey,
                 CustomName = normalizedName,
-                Comment = normalizedComment
+                Comment = normalizedComment,
+                BlockInGuest = blockInGuest
             };
         }
 
@@ -4953,7 +4990,7 @@ public partial class MainViewModel : ViewModelBase
 
             var normalizedName = (metadata.CustomName ?? string.Empty).Trim();
             var normalizedComment = (metadata.Comment ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(normalizedName) && string.IsNullOrWhiteSpace(normalizedComment))
+            if (string.IsNullOrWhiteSpace(normalizedName) && string.IsNullOrWhiteSpace(normalizedComment) && !metadata.BlockInGuest)
             {
                 continue;
             }
@@ -4963,7 +5000,8 @@ public partial class MainViewModel : ViewModelBase
             {
                 DeviceKey = busKey,
                 CustomName = normalizedName,
-                Comment = normalizedComment
+                Comment = normalizedComment,
+                BlockInGuest = metadata.BlockInGuest
             };
             _usbMetadataBusAliasExpiresUtc[busKey] = now + UsbMetadataBusAliasTtl;
         }
@@ -4974,7 +5012,8 @@ public partial class MainViewModel : ViewModelBase
             {
                 DeviceKey = alias.DeviceKey,
                 CustomName = alias.CustomName,
-                Comment = alias.Comment
+                Comment = alias.Comment,
+                BlockInGuest = alias.BlockInGuest
             };
         }
 
@@ -4993,6 +5032,16 @@ public partial class MainViewModel : ViewModelBase
             if (string.IsNullOrWhiteSpace(description))
             {
                 continue;
+            }
+
+            var busId = (device.BusId ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(busId))
+            {
+                var busKey = "busid:" + busId;
+                if (!descriptionsByKey.ContainsKey(busKey))
+                {
+                    descriptionsByKey[busKey] = description;
+                }
             }
 
             foreach (var aliasKey in BuildUsbIdentityAliasKeys(device))
@@ -5055,7 +5104,7 @@ public partial class MainViewModel : ViewModelBase
         return TryUpdateUsbMetadata(SelectedUsbDevice, customName, customComment, out message);
     }
 
-    public bool TryUpdateUsbMetadata(UsbIpDeviceInfo device, string? customName, string? customComment, out string message)
+    public bool TryUpdateUsbMetadata(UsbIpDeviceInfo device, string? customName, string? customComment, out string message, bool? blockInGuest = null)
     {
         if (device is null)
         {
@@ -5072,7 +5121,13 @@ public partial class MainViewModel : ViewModelBase
 
         var normalizedName = (customName ?? string.Empty).Trim();
         var normalizedComment = (customComment ?? string.Empty).Trim();
-        var hasMetadata = !string.IsNullOrWhiteSpace(normalizedName) || !string.IsNullOrWhiteSpace(normalizedComment);
+        var existingBlockInGuest = _usbDeviceMetadataByKey.TryGetValue(key, out var existingMetadata)
+            ? existingMetadata.BlockInGuest
+            : false;
+        var normalizedBlockInGuest = blockInGuest ?? existingBlockInGuest;
+        var hasMetadata = !string.IsNullOrWhiteSpace(normalizedName)
+                          || !string.IsNullOrWhiteSpace(normalizedComment)
+                          || normalizedBlockInGuest;
         var aliasKeys = BuildUsbIdentityAliasKeys(device)
             .Where(identityKey => !string.IsNullOrWhiteSpace(identityKey))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -5105,7 +5160,8 @@ public partial class MainViewModel : ViewModelBase
 
             if (_usbDeviceMetadataByKey.TryGetValue(key, out var existing)
                 && string.Equals(existing.CustomName, normalizedName, StringComparison.Ordinal)
-                && string.Equals(existing.Comment, normalizedComment, StringComparison.Ordinal))
+                && string.Equals(existing.Comment, normalizedComment, StringComparison.Ordinal)
+                && existing.BlockInGuest == normalizedBlockInGuest)
             {
                 // no-op
             }
@@ -5115,7 +5171,8 @@ public partial class MainViewModel : ViewModelBase
                 {
                     DeviceKey = key,
                     CustomName = normalizedName,
-                    Comment = normalizedComment
+                    Comment = normalizedComment,
+                    BlockInGuest = normalizedBlockInGuest
                 };
                 changed = true;
             }
@@ -5127,9 +5184,41 @@ public partial class MainViewModel : ViewModelBase
             return false;
         }
 
+        if (!hasMetadata)
+        {
+            var busAliasKeysToRemove = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (!string.IsNullOrWhiteSpace(device.BusId))
+            {
+                busAliasKeysToRemove.Add("busid:" + device.BusId.Trim());
+            }
+
+            foreach (var runtimeDevice in UsbDevices)
+            {
+                if (runtimeDevice is null || string.IsNullOrWhiteSpace(runtimeDevice.BusId))
+                {
+                    continue;
+                }
+
+                var runtimeKey = BuildUsbDeviceIdentityKey(runtimeDevice);
+                if (!string.IsNullOrWhiteSpace(runtimeKey)
+                    && string.Equals(runtimeKey, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    busAliasKeysToRemove.Add("busid:" + runtimeDevice.BusId.Trim());
+                }
+            }
+
+            foreach (var busAliasKey in busAliasKeysToRemove)
+            {
+                _usbMetadataBusAliasByKey.Remove(busAliasKey);
+                _usbMetadataBusAliasExpiresUtc.Remove(busAliasKey);
+            }
+        }
+
         device.DeviceIdentityKey = key;
         device.CustomName = normalizedName;
         device.CustomComment = normalizedComment;
+        device.IsGuestConnectionBlocked = normalizedBlockInGuest;
 
         foreach (var runtimeDevice in UsbDevices)
         {
@@ -5140,6 +5229,7 @@ public partial class MainViewModel : ViewModelBase
                 runtimeDevice.DeviceIdentityKey = key;
                 runtimeDevice.CustomName = normalizedName;
                 runtimeDevice.CustomComment = normalizedComment;
+                runtimeDevice.IsGuestConnectionBlocked = normalizedBlockInGuest;
             }
         }
 
@@ -5155,6 +5245,18 @@ public partial class MainViewModel : ViewModelBase
             selectedDevice.DeviceIdentityKey = key;
             selectedDevice.CustomName = normalizedName;
             selectedDevice.CustomComment = normalizedComment;
+            selectedDevice.IsGuestConnectionBlocked = normalizedBlockInGuest;
+        }
+
+        _suppressUsbGuestBlockToggleHandling = true;
+        try
+        {
+            SelectedUsbDeviceGuestAccessBlocked = SelectedUsbDevice is not null
+                && SelectedUsbDevice.IsGuestConnectionBlocked;
+        }
+        finally
+        {
+            _suppressUsbGuestBlockToggleHandling = false;
         }
 
         PersistUsbAutoShareConfig();
@@ -5162,8 +5264,8 @@ public partial class MainViewModel : ViewModelBase
         NotifyTrayStateChanged();
 
         message = hasMetadata
-            ? "USB-Name/Kommentar gespeichert."
-            : "USB-Name/Kommentar entfernt.";
+            ? "USB-Metadaten gespeichert."
+            : "USB-Metadaten entfernt.";
         return true;
     }
 
@@ -5809,6 +5911,162 @@ public partial class MainViewModel : ViewModelBase
         }
 
         await UnbindSelectedUsbDeviceAsync();
+    }
+
+    public async Task<HostUsbShareCommandResult> EnsureUsbSharedByBusIdAsync(
+        HostUsbShareCommandRequest request,
+        CancellationToken cancellationToken)
+    {
+        var normalizedBusId = (request?.BusId ?? string.Empty).Trim();
+        var guestComputerName = (request?.GuestComputerName ?? string.Empty).Trim();
+        var sourceVmId = (request?.SourceVmId ?? string.Empty).Trim();
+
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return new HostUsbShareCommandResult
+            {
+                Success = false,
+                AlreadyShared = false,
+                BusId = string.Empty,
+                ErrorCode = "invalid_busid",
+                Message = "BUSID fehlt."
+            };
+        }
+
+        if (!HostUsbSharingEnabled)
+        {
+            return new HostUsbShareCommandResult
+            {
+                Success = false,
+                AlreadyShared = false,
+                BusId = normalizedBusId,
+                ErrorCode = "host_feature_disabled",
+                Message = "USB Share ist im Host deaktiviert."
+            };
+        }
+
+        if (!UsbRuntimeAvailable)
+        {
+            await RefreshUsbRuntimeAvailabilityAsync();
+            if (!UsbRuntimeAvailable)
+            {
+                return new HostUsbShareCommandResult
+                {
+                    Success = false,
+                    AlreadyShared = false,
+                    BusId = normalizedBusId,
+                    ErrorCode = "runtime_unavailable",
+                    Message = string.IsNullOrWhiteSpace(UsbRuntimeHintText)
+                        ? "USB Runtime ist nicht verfügbar."
+                        : UsbRuntimeHintText
+                };
+            }
+        }
+
+        var gateEntered = false;
+        try
+        {
+            await _usbTrayRefreshGate.WaitAsync(cancellationToken);
+            gateEntered = true;
+
+            var devices = await _usbIpService.GetDevicesAsync(cancellationToken);
+            var target = devices.FirstOrDefault(device =>
+                string.Equals((device.BusId ?? string.Empty).Trim(), normalizedBusId, StringComparison.OrdinalIgnoreCase));
+
+            if (target is null)
+            {
+                return new HostUsbShareCommandResult
+                {
+                    Success = false,
+                    AlreadyShared = false,
+                    BusId = normalizedBusId,
+                    ErrorCode = "busid_not_found",
+                    Message = "USB-Gerät am Host nicht gefunden."
+                };
+            }
+
+            if (target.IsShared)
+            {
+                return new HostUsbShareCommandResult
+                {
+                    Success = true,
+                    AlreadyShared = true,
+                    BusId = normalizedBusId,
+                    ErrorCode = string.Empty,
+                    Message = "USB-Gerät ist bereits freigegeben."
+                };
+            }
+
+            await _usbIpService.BindAsync(normalizedBusId, force: false, cancellationToken);
+
+            var verifyDevices = await _usbIpService.GetDevicesAsync(cancellationToken);
+            var verified = verifyDevices.FirstOrDefault(device =>
+                string.Equals((device.BusId ?? string.Empty).Trim(), normalizedBusId, StringComparison.OrdinalIgnoreCase));
+
+            if (verified is null || (!verified.IsShared && !verified.IsAttached))
+            {
+                return new HostUsbShareCommandResult
+                {
+                    Success = false,
+                    AlreadyShared = false,
+                    BusId = normalizedBusId,
+                    ErrorCode = "verify_failed",
+                    Message = "USB-Freigabe konnte nicht bestätigt werden."
+                };
+            }
+
+            try
+            {
+                await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "USB tray refresh failed after guest-initiated host share. BusId={BusId}", normalizedBusId);
+            }
+
+            Log.Information(
+                "USB device shared for guest connect request. BusId={BusId}; GuestComputerName={GuestComputerName}; SourceVmId={SourceVmId}",
+                normalizedBusId,
+                string.IsNullOrWhiteSpace(guestComputerName) ? "unknown" : guestComputerName,
+                string.IsNullOrWhiteSpace(sourceVmId) ? "unknown" : sourceVmId);
+
+            return new HostUsbShareCommandResult
+            {
+                Success = true,
+                AlreadyShared = false,
+                BusId = normalizedBusId,
+                ErrorCode = string.Empty,
+                Message = "USB-Gerät wurde am Host freigegeben."
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex,
+                "Guest-initiated host USB share failed. BusId={BusId}; GuestComputerName={GuestComputerName}; SourceVmId={SourceVmId}",
+                normalizedBusId,
+                string.IsNullOrWhiteSpace(guestComputerName) ? "unknown" : guestComputerName,
+                string.IsNullOrWhiteSpace(sourceVmId) ? "unknown" : sourceVmId);
+
+            return new HostUsbShareCommandResult
+            {
+                Success = false,
+                AlreadyShared = false,
+                BusId = normalizedBusId,
+                ErrorCode = "bind_failed",
+                Message = string.IsNullOrWhiteSpace(ex.Message) ? "USB-Freigabe fehlgeschlagen." : ex.Message.Trim()
+            };
+        }
+        finally
+        {
+            if (gateEntered)
+            {
+                _usbTrayRefreshGate.Release();
+            }
+        }
     }
 
     public async Task RefreshTrayDataAsync()
@@ -6900,14 +7158,18 @@ public partial class MainViewModel : ViewModelBase
                 }
 
                 _suppressUsbAutoShareToggleHandling = true;
+                _suppressUsbGuestBlockToggleHandling = true;
                 try
                 {
                     SelectedUsbDeviceAutoShareEnabled = SelectedUsbDevice is not null
                         && IsUsbAutoShareEnabledForDevice(SelectedUsbDevice);
+                    SelectedUsbDeviceGuestAccessBlocked = SelectedUsbDevice is not null
+                        && SelectedUsbDevice.IsGuestConnectionBlocked;
                 }
                 finally
                 {
                     _suppressUsbAutoShareToggleHandling = false;
+                    _suppressUsbGuestBlockToggleHandling = false;
                 }
             }
             finally
@@ -7389,7 +7651,7 @@ public partial class MainViewModel : ViewModelBase
 
                 var customName = (metadata.CustomName ?? string.Empty).Trim();
                 var comment = (metadata.Comment ?? string.Empty).Trim();
-                if (string.IsNullOrWhiteSpace(customName) && string.IsNullOrWhiteSpace(comment))
+                if (string.IsNullOrWhiteSpace(customName) && string.IsNullOrWhiteSpace(comment) && !metadata.BlockInGuest)
                 {
                     continue;
                 }
@@ -7398,7 +7660,8 @@ public partial class MainViewModel : ViewModelBase
                 {
                     DeviceKey = deviceKey,
                     CustomName = customName,
-                    Comment = comment
+                    Comment = comment,
+                    BlockInGuest = metadata.BlockInGuest
                 };
             }
 
@@ -7424,14 +7687,18 @@ public partial class MainViewModel : ViewModelBase
             ApplyConfiguredSharedFolders(config.SharedFolders.HostDefinitions);
 
             _suppressUsbAutoShareToggleHandling = true;
+            _suppressUsbGuestBlockToggleHandling = true;
             try
             {
                 SelectedUsbDeviceAutoShareEnabled = SelectedUsbDevice is not null
                     && IsUsbAutoShareEnabledForDevice(SelectedUsbDevice);
+                SelectedUsbDeviceGuestAccessBlocked = SelectedUsbDevice is not null
+                    && SelectedUsbDevice.IsGuestConnectionBlocked;
             }
             finally
             {
                 _suppressUsbAutoShareToggleHandling = false;
+                _suppressUsbGuestBlockToggleHandling = false;
             }
         }
         finally

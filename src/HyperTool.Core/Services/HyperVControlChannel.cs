@@ -7,6 +7,7 @@ namespace HyperTool.Services;
 
 public sealed class HyperVControlChannel : IAsyncDisposable, IDisposable
 {
+    private const string EnsureUsbSharedCommand = "ensure-usb-shared";
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -110,6 +111,87 @@ public sealed class HyperVControlChannel : IAsyncDisposable, IDisposable
         }
     }
 
+    public async Task<HostUsbShareCommandResult> EnsureHostUsbSharedAsync(
+        HostUsbShareCommandRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
+        var normalizedBusId = (request.BusId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return new HostUsbShareCommandResult
+            {
+                Success = false,
+                AlreadyShared = false,
+                BusId = string.Empty,
+                ErrorCode = "invalid_busid",
+                Message = "BUSID fehlt."
+            };
+        }
+
+        var requestPayload = JsonSerializer.Serialize(new
+        {
+            command = EnsureUsbSharedCommand,
+            busId = normalizedBusId,
+            sourceVmId = (request.SourceVmId ?? string.Empty).Trim(),
+            guestComputerName = (request.GuestComputerName ?? string.Empty).Trim()
+        }, JsonOptions);
+
+        var responsePayload = await _hostIdentityConnection.SendAndReceiveLineAsync(requestPayload, cancellationToken);
+        if (string.IsNullOrWhiteSpace(responsePayload))
+        {
+            return new HostUsbShareCommandResult
+            {
+                Success = false,
+                AlreadyShared = false,
+                BusId = normalizedBusId,
+                ErrorCode = "no_response",
+                Message = "Keine Antwort vom Host erhalten."
+            };
+        }
+
+        try
+        {
+            var response = JsonSerializer.Deserialize<HostIdentityCommandWirePayload>(responsePayload, JsonOptions);
+            if (response is null
+                || !string.Equals(response.Type, "command-result", StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(response.Command, EnsureUsbSharedCommand, StringComparison.OrdinalIgnoreCase)
+                || response.Result is null)
+            {
+                return new HostUsbShareCommandResult
+                {
+                    Success = false,
+                    AlreadyShared = false,
+                    BusId = normalizedBusId,
+                    ErrorCode = "unsupported",
+                    Message = "Host unterstützt Guest-initiierte USB-Freigabe nicht."
+                };
+            }
+
+            response.Result.BusId = string.IsNullOrWhiteSpace(response.Result.BusId)
+                ? normalizedBusId
+                : response.Result.BusId.Trim();
+            response.Result.ErrorCode = (response.Result.ErrorCode ?? string.Empty).Trim();
+            response.Result.Message = (response.Result.Message ?? string.Empty).Trim();
+            return response.Result;
+        }
+        catch
+        {
+            return new HostUsbShareCommandResult
+            {
+                Success = false,
+                AlreadyShared = false,
+                BusId = normalizedBusId,
+                ErrorCode = "invalid_response",
+                Message = "Host-Antwort konnte nicht ausgewertet werden."
+            };
+        }
+    }
+
     private async Task<IReadOnlyList<HostSharedFolderDefinition>> FetchSharedFolderCatalogCoreAsync(CancellationToken cancellationToken)
     {
         var payload = await _sharedCatalogConnection.SendAndReceiveLineAsync("{}", cancellationToken);
@@ -154,5 +236,14 @@ public sealed class HyperVControlChannel : IAsyncDisposable, IDisposable
         public string HostName { get; set; } = string.Empty;
         public string Fqdn { get; set; } = string.Empty;
         public HostFeatureAvailability? Features { get; set; }
+    }
+
+    private sealed class HostIdentityCommandWirePayload
+    {
+        public string Type { get; set; } = string.Empty;
+
+        public string Command { get; set; } = string.Empty;
+
+        public HostUsbShareCommandResult? Result { get; set; }
     }
 }

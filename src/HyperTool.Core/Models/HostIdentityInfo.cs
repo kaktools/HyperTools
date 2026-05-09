@@ -41,3 +41,25 @@ public sealed class HostIdentityInfo
 
     public HostFeatureAvailability Features { get; set; } = new();
 }
+
+public sealed class HostUsbShareCommandRequest
+{
+    public string BusId { get; set; } = string.Empty;
+
+    public string SourceVmId { get; set; } = string.Empty;
+
+    public string GuestComputerName { get; set; } = string.Empty;
+}
+
+public sealed class HostUsbShareCommandResult
+{
+    public bool Success { get; set; }
+
+    public bool AlreadyShared { get; set; }
+
+    public string BusId { get; set; } = string.Empty;
+
+    public string ErrorCode { get; set; } = string.Empty;
+
+    public string Message { get; set; } = string.Empty;
+}

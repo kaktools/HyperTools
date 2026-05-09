@@ -1891,6 +1891,7 @@ internal sealed class GuestMainWindow : Window
             _lastUsbSelectionKey = BuildUsbSelectionKey(GetSelectedUsbDevice());
             UpdateAutoConnectToggleFromSelection();
         };
+        _usbListView.ContainerContentChanging += OnUsbListContainerContentChanging;
 
         Grid.SetRow(listBorder, 1);
         root.Children.Add(listBorder);
@@ -1902,18 +1903,91 @@ internal sealed class GuestMainWindow : Window
     {
         const string templateXaml = """
 <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
-    <Grid ColumnSpacing='10' Margin='4,2,4,2'>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width='*'/>
-            <ColumnDefinition Width='280'/>
-        </Grid.ColumnDefinitions>
-        <TextBlock Text='{Binding DeviceDisplayName}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center'/>
-        <TextBlock Grid.Column='1' Text='{Binding CustomCommentDisplay, Mode=OneWay}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center' Opacity='0.92'/>
-    </Grid>
+    <Border x:Name='UsbRowBorder' CornerRadius='6' Padding='6,2,6,2' Background='Transparent'>
+        <Grid ColumnSpacing='10'>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width='*'/>
+                <ColumnDefinition Width='280'/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name='UsbDeviceNameText' Text='{Binding DeviceDisplayName}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center'/>
+            <TextBlock x:Name='UsbDeviceCommentText' Grid.Column='1' Text='{Binding CustomCommentDisplay, Mode=OneWay}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center' Opacity='0.92'/>
+        </Grid>
+    </Border>
 </DataTemplate>
 """;
 
         return (DataTemplate)XamlReader.Load(templateXaml);
+    }
+
+    private void OnUsbListContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.InRecycleQueue)
+        {
+            return;
+        }
+
+        if (args.ItemContainer.ContentTemplateRoot is not FrameworkElement templateRoot
+            || args.Item is not UsbIpDeviceInfo device)
+        {
+            return;
+        }
+
+        var rowBorder = FindDescendantByName<Border>(templateRoot, "UsbRowBorder");
+        var nameText = FindDescendantByName<TextBlock>(templateRoot, "UsbDeviceNameText");
+        var commentText = FindDescendantByName<TextBlock>(templateRoot, "UsbDeviceCommentText");
+        if (rowBorder is null || nameText is null || commentText is null)
+        {
+            return;
+        }
+
+        var highlightAttached = device.IsAttachedInCurrentGuest || (device.IsAttached && !device.IsAttachedByOtherGuest);
+        if (highlightAttached)
+        {
+            rowBorder.Background = ResolveAttachedRowBrush(templateRoot);
+            nameText.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
+            commentText.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
+        }
+        else
+        {
+            rowBorder.Background = new SolidColorBrush(Color.FromArgb(0x00, 0x00, 0x00, 0x00));
+            nameText.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
+            commentText.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
+        }
+    }
+
+    private static Brush ResolveAttachedRowBrush(FrameworkElement themeSource)
+    {
+        var theme = themeSource.ActualTheme;
+        if (theme == ElementTheme.Dark)
+        {
+            // Dezent in der gleichen Farbfamilie wie der "Aktiv"-Chip (Dark).
+            return new SolidColorBrush(Color.FromArgb(0x48, 0x14, 0x3C, 0x2C));
+        }
+
+        // Dezent in der gleichen Farbfamilie wie der "Aktiv"-Chip (Light).
+        return new SolidColorBrush(Color.FromArgb(0xA6, 0xE8, 0xF8, 0xEF));
+    }
+
+    private static T? FindDescendantByName<T>(DependencyObject root, string name)
+        where T : FrameworkElement
+    {
+        if (root is T candidate && string.Equals(candidate.Name, name, StringComparison.Ordinal))
+        {
+            return candidate;
+        }
+
+        var childCount = VisualTreeHelper.GetChildrenCount(root);
+        for (var index = 0; index < childCount; index++)
+        {
+            var child = VisualTreeHelper.GetChild(root, index);
+            var found = FindDescendantByName<T>(child, name);
+            if (found is not null)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     private UIElement BuildSharedFoldersPage()
@@ -4470,6 +4544,34 @@ internal sealed class GuestMainWindow : Window
             : $"[Error] USB Host-Attach fehlgeschlagen (Code {code}).");
 
         await RefreshUsbAsync();
+
+        if (code == 0)
+        {
+            await RefreshUsbFastFollowupAsync(selected.BusId);
+        }
+    }
+
+    private async Task RefreshUsbFastFollowupAsync(string? busId)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return;
+        }
+
+        var delaysMs = new[] { 250, 550, 900 };
+        foreach (var delayMs in delaysMs)
+        {
+            await Task.Delay(delayMs);
+            await RefreshUsbAsync();
+
+            var current = _usbDevices.FirstOrDefault(device =>
+                string.Equals((device.BusId ?? string.Empty).Trim(), normalizedBusId, StringComparison.OrdinalIgnoreCase));
+            if (current is not null && (current.IsAttachedInCurrentGuest || (current.IsAttached && !current.IsAttachedByOtherGuest)))
+            {
+                break;
+            }
+        }
     }
 
     private async Task DisconnectUsbAsync()

@@ -2852,6 +2852,7 @@ public sealed partial class App : Application
 
         try
         {
+            IReadOnlyList<UsbIpDeviceInfo> transportList = Array.Empty<UsbIpDeviceInfo>();
             IReadOnlyList<UsbIpDeviceInfo> list = Array.Empty<UsbIpDeviceInfo>();
             var useRemoteHostList = !string.IsNullOrWhiteSpace(hostResolution.ResolvedIpv4);
             var fallbackToIpUsed = false;
@@ -2859,7 +2860,8 @@ public sealed partial class App : Application
 
             if (useHyperVSocket
                 && useRemoteHostList
-                && (forceHostIdentityRefresh
+                && (emitLogs
+                    || forceHostIdentityRefresh
                     || (DateTimeOffset.UtcNow - _lastHostIdentityBackgroundAttemptUtc) >= TimeSpan.FromSeconds(GuestHostIdentityUsbRefreshSeconds)))
             {
                 _lastHostIdentityBackgroundAttemptUtc = DateTimeOffset.UtcNow;
@@ -2880,7 +2882,7 @@ public sealed partial class App : Application
             {
                 try
                 {
-                    list = await GetRemoteUsbDevicesWithTimeoutAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
+                    transportList = await GetRemoteUsbDevicesWithTimeoutAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
                 }
                 catch (Exception hyperVEx) when (string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase))
                 {
@@ -2894,7 +2896,7 @@ public sealed partial class App : Application
                             await Task.Delay(retryDelayMs);
                             try
                             {
-                                list = await GetRemoteUsbDevicesWithTimeoutAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
+                                transportList = await GetRemoteUsbDevicesWithTimeoutAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
                                 recoveredByRetry = true;
                                 break;
                             }
@@ -2931,27 +2933,31 @@ public sealed partial class App : Application
                             MarkHyperVDataPathFailure();
                         }
 
-                        list = await GetRemoteUsbDevicesWithTimeoutAsync(ipFallbackResolution.ResolvedIpv4, CancellationToken.None);
+                        transportList = await GetRemoteUsbDevicesWithTimeoutAsync(ipFallbackResolution.ResolvedIpv4, CancellationToken.None);
                     }
                 }
             }
             else
             {
-                list = await GetLocalUsbDevicesWithTimeoutAsync(CancellationToken.None);
+                transportList = await GetLocalUsbDevicesWithTimeoutAsync(CancellationToken.None);
             }
 
             var retryTriggered = false;
-            if (useRemoteHostList && list.Count == 0 && previousCount > 0)
+            if (useRemoteHostList && transportList.Count == 0 && previousCount > 0)
             {
                 retryTriggered = true;
                 await Task.Delay(900);
-                list = await GetRemoteUsbDevicesWithTimeoutAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
+                transportList = await GetRemoteUsbDevicesWithTimeoutAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
             }
+
+            list = MergeHostIdentityOnlyUsbDevices(transportList);
 
             foreach (var device in list)
             {
                 ApplyHostUsbMetadata(device);
             }
+
+            list = FilterBlockedUsbDevices(list);
 
             SyncUsbManualDisconnectPendingState(list);
 
@@ -2968,7 +2974,7 @@ public sealed partial class App : Application
 
             if (effectiveRemoteList)
             {
-                await CleanupDanglingGuestAttachmentsAsync(list, effectiveHostAddress!);
+                await CleanupDanglingGuestAttachmentsAsync(transportList, effectiveHostAddress!);
             }
 
             var autoConnectApplied = await ApplyUsbAutoConnectAsync(list);
@@ -2978,12 +2984,14 @@ public sealed partial class App : Application
 
                 if (effectiveRemoteList)
                 {
-                    list = await _usbService.GetRemoteDevicesAsync(effectiveHostAddress!, CancellationToken.None);
+                    transportList = await _usbService.GetRemoteDevicesAsync(effectiveHostAddress!, CancellationToken.None);
                 }
                 else
                 {
-                    list = await _usbService.GetDevicesAsync(CancellationToken.None);
+                    transportList = await _usbService.GetDevicesAsync(CancellationToken.None);
                 }
+
+                list = MergeHostIdentityOnlyUsbDevices(transportList);
             }
 
             foreach (var device in list)
@@ -2991,9 +2999,11 @@ public sealed partial class App : Application
                 ApplyHostUsbMetadata(device);
             }
 
+            list = FilterBlockedUsbDevices(list);
+
             var transientRemoteListGap = useRemoteHostList
                 && previouslyAttachedBusIds.Count > 0
-                && list.Count == 0;
+                && transportList.Count == 0;
 
             if (transientRemoteListGap)
             {
@@ -3199,7 +3209,9 @@ public sealed partial class App : Application
                 || !string.Equals(left.AttachedGuestComputerName, right.AttachedGuestComputerName, StringComparison.Ordinal)
                 || !string.Equals(left.StateText, right.StateText, StringComparison.Ordinal)
                 || !string.Equals(left.CustomName, right.CustomName, StringComparison.Ordinal)
-                || !string.Equals(left.CustomComment, right.CustomComment, StringComparison.Ordinal))
+                || !string.Equals(left.CustomComment, right.CustomComment, StringComparison.Ordinal)
+                || left.IsGuestConnectionBlocked != right.IsGuestConnectionBlocked
+                || left.IsAttachedInCurrentGuest != right.IsAttachedInCurrentGuest)
             {
                 return false;
             }
@@ -3409,6 +3421,16 @@ public sealed partial class App : Application
         ApplyUsbTransportResolution(hostResolution);
         var beforeDevice = FindUsbByBusId(busId);
 
+        if (beforeDevice?.IsGuestConnectionBlocked == true)
+        {
+            GuestLogger.Warn("usb.connect.blocked_by_host", "USB Connect blockiert: Gerät ist vom Host für Guest-Nutzung gesperrt.", new
+            {
+                busId,
+                operationId
+            });
+            return 1;
+        }
+
         if (!skipCachedAttachedCheck && IsGuestLocalAttachedDevice(beforeDevice))
         {
             _selectedUsbBusId = busId;
@@ -3446,6 +3468,94 @@ public sealed partial class App : Application
                 sharePath = _config?.SharePath
             });
             return 1;
+        }
+
+        var shouldRequestHostShare = useHyperVSocket && (beforeDevice is null || !beforeDevice.IsShared);
+        if (shouldRequestHostShare)
+        {
+            try
+            {
+                shouldRequestHostShare = !await IsUsbDeviceSharedOnHostTransportAsync(
+                    busId,
+                    hostResolution.ResolvedIpv4,
+                    CancellationToken.None);
+            }
+            catch
+            {
+                // Keep conservative behavior and fall back to host share request path.
+            }
+        }
+
+        if (shouldRequestHostShare)
+        {
+            var shareRequest = new HostUsbShareCommandRequest
+            {
+                BusId = busId,
+                GuestComputerName = Environment.MachineName,
+                SourceVmId = string.Empty
+            };
+
+            HostUsbShareCommandResult shareResult;
+            try
+            {
+                var hostIdentityClient = new HyperVSocketHostIdentityGuestClient();
+                shareResult = await hostIdentityClient.EnsureHostUsbSharedAsync(shareRequest, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                GuestLogger.Warn("usb.connect.share_request.failed", ex.Message, new
+                {
+                    operationId,
+                    busId,
+                    hostSource = hostResolution.Source,
+                    exceptionType = ex.GetType().FullName
+                });
+                shareResult = new HostUsbShareCommandResult
+                {
+                    Success = false,
+                    AlreadyShared = false,
+                    BusId = busId,
+                    ErrorCode = "share_request_transport_failed",
+                    Message = ex.Message
+                };
+            }
+
+            if (!shareResult.Success)
+            {
+                var isUnsupportedHost = string.Equals(shareResult.ErrorCode, "unsupported", StringComparison.OrdinalIgnoreCase);
+                if (!isUnsupportedHost)
+                {
+                    GuestLogger.Warn("usb.connect.share_request.rejected", string.IsNullOrWhiteSpace(shareResult.Message) ? "Host USB-Share-Request wurde abgelehnt." : shareResult.Message, new
+                    {
+                        operationId,
+                        busId,
+                        hostSource = hostResolution.Source,
+                        errorCode = shareResult.ErrorCode,
+                        alreadyShared = shareResult.AlreadyShared
+                    });
+
+                    if (IsHardHostShareFailureCode(shareResult.ErrorCode))
+                    {
+                        return 1;
+                    }
+                }
+            }
+
+            try
+            {
+                await RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                await WaitForUsbSharedOnHostTransportAsync(busId, hostResolution.ResolvedIpv4, CancellationToken.None);
+            }
+            catch
+            {
+            }
         }
 
         try
@@ -3773,6 +3883,56 @@ public sealed partial class App : Application
                 count = state.Count,
                 exceptionType = ex.GetType().FullName
             });
+        }
+    }
+
+    private static bool IsHardHostShareFailureCode(string? errorCode)
+    {
+        var code = (errorCode ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            return false;
+        }
+
+        return code.Equals("invalid_busid", StringComparison.OrdinalIgnoreCase)
+            || code.Equals("host_feature_disabled", StringComparison.OrdinalIgnoreCase)
+            || code.Equals("runtime_unavailable", StringComparison.OrdinalIgnoreCase)
+            || code.Equals("busid_not_found", StringComparison.OrdinalIgnoreCase)
+            || code.Equals("verify_failed", StringComparison.OrdinalIgnoreCase)
+            || code.Equals("bind_failed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<bool> IsUsbDeviceSharedOnHostTransportAsync(string busId, string hostAddress, CancellationToken cancellationToken)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        var normalizedHostAddress = (hostAddress ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId) || string.IsNullOrWhiteSpace(normalizedHostAddress))
+        {
+            return false;
+        }
+
+        var remoteDevices = await GetRemoteUsbDevicesWithTimeoutAsync(normalizedHostAddress, cancellationToken);
+        var match = remoteDevices.FirstOrDefault(device =>
+            string.Equals((device.BusId ?? string.Empty).Trim(), normalizedBusId, StringComparison.OrdinalIgnoreCase));
+
+        return match is not null && (match.IsShared || match.IsAttached);
+    }
+
+    private async Task WaitForUsbSharedOnHostTransportAsync(string busId, string hostAddress, CancellationToken cancellationToken)
+    {
+        if (await IsUsbDeviceSharedOnHostTransportAsync(busId, hostAddress, cancellationToken))
+        {
+            return;
+        }
+
+        var delaysMs = new[] { 150, 320, 550 };
+        foreach (var delayMs in delaysMs)
+        {
+            await Task.Delay(delayMs, cancellationToken);
+            if (await IsUsbDeviceSharedOnHostTransportAsync(busId, hostAddress, cancellationToken))
+            {
+                return;
+            }
         }
     }
 
@@ -5561,7 +5721,7 @@ public sealed partial class App : Application
 
             var customName = (entry.CustomName ?? string.Empty).Trim();
             var comment = (entry.Comment ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(customName) && string.IsNullOrWhiteSpace(comment))
+            if (string.IsNullOrWhiteSpace(customName) && string.IsNullOrWhiteSpace(comment) && !entry.BlockInGuest)
             {
                 continue;
             }
@@ -5570,7 +5730,8 @@ public sealed partial class App : Application
             {
                 DeviceKey = key,
                 CustomName = customName,
-                Comment = comment
+                Comment = comment,
+                BlockInGuest = entry.BlockInGuest
             };
         }
 
@@ -5623,6 +5784,7 @@ public sealed partial class App : Application
             var beforeIdentityKey = usb.DeviceIdentityKey;
             var beforeAttachedGuest = usb.AttachedGuestComputerName;
             var beforeClientIp = usb.ClientIpAddress;
+            var beforeGuestBlocked = usb.IsGuestConnectionBlocked;
 
             ApplyHostUsbMetadata(usb);
 
@@ -5631,10 +5793,22 @@ public sealed partial class App : Application
                 || !string.Equals(beforeCustomComment, usb.CustomComment, StringComparison.Ordinal)
                 || !string.Equals(beforeIdentityKey, usb.DeviceIdentityKey, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(beforeAttachedGuest, usb.AttachedGuestComputerName, StringComparison.Ordinal)
-                || !string.Equals(beforeClientIp, usb.ClientIpAddress, StringComparison.OrdinalIgnoreCase))
+                || !string.Equals(beforeClientIp, usb.ClientIpAddress, StringComparison.OrdinalIgnoreCase)
+                || beforeGuestBlocked != usb.IsGuestConnectionBlocked)
             {
                 usbVisualChanged = true;
             }
+        }
+
+        for (var index = _usbDevices.Count - 1; index >= 0; index--)
+        {
+            if (!_usbDevices[index].IsGuestConnectionBlocked)
+            {
+                continue;
+            }
+
+            _usbDevices.RemoveAt(index);
+            usbVisualChanged = true;
         }
 
         if (usbVisualChanged)
@@ -6003,6 +6177,112 @@ public sealed partial class App : Application
         return normalized;
     }
 
+    private List<UsbIpDeviceInfo> MergeHostIdentityOnlyUsbDevices(IReadOnlyList<UsbIpDeviceInfo> transportList)
+    {
+        var merged = transportList
+            .Where(device => device is not null)
+            .Select(CloneUsbDevice)
+            .ToList();
+
+        var knownBusIds = merged
+            .Where(device => !string.IsNullOrWhiteSpace(device.BusId))
+            .Select(device => device.BusId.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var hostIdentityBusIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var key in _hostUsbDescriptionsByKey.Keys)
+        {
+            if (TryExtractBusIdFromHostIdentityKey(key, out var busId))
+            {
+                hostIdentityBusIds.Add(busId);
+            }
+        }
+
+        foreach (var key in _hostUsbAttachmentsByBusId.Keys)
+        {
+            var busId = (key ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(busId))
+            {
+                hostIdentityBusIds.Add(busId);
+            }
+        }
+
+        foreach (var busId in hostIdentityBusIds)
+        {
+            if (knownBusIds.Contains(busId))
+            {
+                continue;
+            }
+
+            var synthetic = new UsbIpDeviceInfo
+            {
+                BusId = busId,
+                Description = "USB Device"
+            };
+
+            ApplyHostUsbMetadata(synthetic);
+
+            if (string.IsNullOrWhiteSpace(synthetic.Description))
+            {
+                synthetic.Description = "USB Device";
+            }
+
+            merged.Add(synthetic);
+            knownBusIds.Add(busId);
+        }
+
+        return merged;
+    }
+
+    private static IReadOnlyList<UsbIpDeviceInfo> FilterBlockedUsbDevices(IReadOnlyList<UsbIpDeviceInfo> source)
+    {
+        if (source.Count == 0)
+        {
+            return source;
+        }
+
+        var filtered = source
+            .Where(device => device is not null && !device.IsGuestConnectionBlocked)
+            .ToList();
+
+        return filtered;
+    }
+
+    private static UsbIpDeviceInfo CloneUsbDevice(UsbIpDeviceInfo source)
+    {
+        return new UsbIpDeviceInfo
+        {
+            BusId = source.BusId,
+            Description = source.Description,
+            HardwareId = source.HardwareId,
+            HardwareIdentityKey = source.HardwareIdentityKey,
+            InstanceId = source.InstanceId,
+            PersistedGuid = source.PersistedGuid,
+            ClientIpAddress = source.ClientIpAddress,
+            AttachedGuestComputerName = source.AttachedGuestComputerName,
+            DeviceIdentityKey = source.DeviceIdentityKey,
+            CustomName = source.CustomName,
+            CustomComment = source.CustomComment,
+            IsAttachedByOtherGuest = source.IsAttachedByOtherGuest,
+            IsGuestConnectionBlocked = source.IsGuestConnectionBlocked,
+            IsAttachedInCurrentGuest = source.IsAttachedInCurrentGuest
+        };
+    }
+
+    private static bool TryExtractBusIdFromHostIdentityKey(string? key, out string busId)
+    {
+        var normalized = (key ?? string.Empty).Trim();
+        if (normalized.StartsWith("busid:", StringComparison.OrdinalIgnoreCase))
+        {
+            busId = normalized.Substring("busid:".Length).Trim();
+            return !string.IsNullOrWhiteSpace(busId);
+        }
+
+        busId = string.Empty;
+        return false;
+    }
+
     private void ApplyHostUsbMetadata(UsbIpDeviceInfo device)
     {
         if (device is null)
@@ -6036,12 +6316,14 @@ public sealed partial class App : Application
         {
             device.CustomName = string.Empty;
             device.CustomComment = string.Empty;
+            device.IsGuestConnectionBlocked = false;
             ApplyHostUsbAttachmentHint(device);
             return;
         }
 
         device.CustomName = (metadata.CustomName ?? string.Empty).Trim();
         device.CustomComment = (metadata.Comment ?? string.Empty).Trim();
+        device.IsGuestConnectionBlocked = metadata.BlockInGuest;
 
         ApplyHostUsbAttachmentHint(device);
     }
@@ -6057,6 +6339,7 @@ public sealed partial class App : Application
         }
 
         var hasLocalPortAttachment = !string.IsNullOrWhiteSpace((device.ClientIpAddress ?? string.Empty).Trim());
+        device.IsAttachedInCurrentGuest = hasLocalPortAttachment;
 
         if (!_hostUsbAttachmentsByBusId.TryGetValue(busId, out var attachment))
         {
@@ -6064,6 +6347,7 @@ public sealed partial class App : Application
             {
                 device.AttachedGuestComputerName = string.Empty;
                 device.ClientIpAddress = string.Empty;
+                device.IsAttachedInCurrentGuest = false;
             }
 
             return;
@@ -6099,6 +6383,7 @@ public sealed partial class App : Application
             device.IsAttachedByOtherGuest = false;
             device.AttachedGuestComputerName = string.Empty;
             device.ClientIpAddress = string.Empty;
+            device.IsAttachedInCurrentGuest = false;
             return;
         }
 
@@ -6108,6 +6393,7 @@ public sealed partial class App : Application
             device.IsAttachedByOtherGuest = false;
             device.AttachedGuestComputerName = string.Empty;
             device.ClientIpAddress = string.Empty;
+            device.IsAttachedInCurrentGuest = false;
             return;
         }
 
@@ -6118,6 +6404,7 @@ public sealed partial class App : Application
             : string.Empty;
         // Keep ClientIpAddress empty for remote ownership hints so local attach logic stays deterministic.
         device.ClientIpAddress = string.Empty;
+        device.IsAttachedInCurrentGuest = false;
     }
 
     private void StartUsbDiagnosticsLoop()
@@ -7250,13 +7537,13 @@ public sealed partial class App : Application
     {
         try
         {
-            var identity = await FetchHostIdentityViaHyperVSocketAsync(cancellationToken);
+            var identity = await FetchHostIdentityViaHyperVSocketAsync(cancellationToken, forceRefresh: true);
             if (identity is not null)
             {
                 ApplyHostIdentityToConfig(identity, persistConfig: true);
             }
 
-            await RefreshUsbDevicesAsync(emitLogs: false);
+            await RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
             TriggerSharedFolderReconnectCycle();
         }
         catch
