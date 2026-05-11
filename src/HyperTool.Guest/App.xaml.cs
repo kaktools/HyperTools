@@ -56,6 +56,8 @@ public sealed partial class App : Application
     private const string GuestWindowTitle = "HyperTool Guest";
     private const string GuestHeadline = "HyperTool Guest";
     private const string GuestIconUri = "ms-appx:///Assets/HyperTool.Guest.Icon.Transparent.png";
+    private static readonly TimeSpan TrayGuestNetworkCacheTtl = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan TrayGuestNetworkCacheFileMaxAge = TimeSpan.FromHours(12);
 
     private const string SingleInstanceMutexName = @"Local\HyperTool.Guest.SingleInstance";
     private const string SingleInstancePipeName = "HyperTool.Guest.SingleInstance.Activate";
@@ -143,6 +145,8 @@ public sealed partial class App : Application
     private string? _selectedUsbBusId;
     private GuestVmNetworkOverviewResult _trayGuestVmNetworkOverview = new();
     private string _traySelectedGuestVmNetworkAdapterName = string.Empty;
+    private DateTimeOffset _trayGuestVmNetworkCachedAtUtc = DateTimeOffset.MinValue;
+    private string _trayGuestVmNetworkCachePath = string.Empty;
     private bool _isRefreshingTrayGuestVmNetwork;
     private string _trayGuestVmNetworkStatusText = string.Empty;
     private bool _isUsbClientAvailable;
@@ -232,6 +236,13 @@ public sealed partial class App : Application
         public int Attempted { get; init; }
         public int NewlyMounted { get; init; }
         public int Failed { get; init; }
+    }
+
+    private sealed class TrayGuestNetworkCachePayload
+    {
+        public DateTimeOffset CachedAtUtc { get; set; }
+        public string SelectedAdapterName { get; set; } = string.Empty;
+        public GuestVmNetworkOverviewResult Overview { get; set; } = new();
     }
 
     public App()
@@ -1486,6 +1497,8 @@ public sealed partial class App : Application
             _config = GuestConfigService.LoadOrCreate(_configPath, out _);
             _config.Usb ??= new GuestUsbSettings();
             _config.Usb.UseHyperVSocket = true;
+            _trayGuestVmNetworkCachePath = ResolveTrayGuestVmNetworkCachePath();
+            TryLoadTrayGuestVmNetworkCache();
             _currentUsbTransportUseHyperVSocket = true;
             GuestLogger.Initialize(_config.Logging, _config.Ui.DebugLoggingEnabled);
             TryRemoveLegacyUsbFirewallRules();
@@ -1523,7 +1536,7 @@ public sealed partial class App : Application
                 DiscoverUsbHostAddressAsync,
                 FetchHostSharedFoldersAsync,
                 FetchGuestVmNetworkOverviewAsync,
-                SwitchGuestVmNetworkAdapterAsync,
+                SwitchGuestVmNetworkAdapterWithCacheSyncAsync,
                 RefreshAfterGuestVmNetworkSwitchAsync,
                 _isUsbClientAvailable);
             // Keep UI and app state in sync when a window is newly created and
@@ -2175,7 +2188,7 @@ public sealed partial class App : Application
                 DiscoverUsbHostAddressAsync,
                 FetchHostSharedFoldersAsync,
                 FetchGuestVmNetworkOverviewAsync,
-                SwitchGuestVmNetworkAdapterAsync,
+                SwitchGuestVmNetworkAdapterWithCacheSyncAsync,
                 RefreshAfterGuestVmNetworkSwitchAsync,
                 _isUsbClientAvailable);
 
@@ -2317,7 +2330,10 @@ public sealed partial class App : Application
 
             EnsureTrayControlCenterWindow();
             UpdateTrayControlCenterView();
-            _ = RefreshGuestVmNetworkForTrayAsync(force: false);
+            if (ShouldRefreshTrayGuestVmNetwork(force: false))
+            {
+                _ = RefreshGuestVmNetworkForTrayAsync(force: false);
+            }
         }
         catch (Exception ex)
         {
@@ -2552,14 +2568,18 @@ public sealed partial class App : Application
             return;
         }
 
-        _ = RefreshUsbDevicesAsync();
-        _ = RefreshGuestVmNetworkForTrayAsync(force: false);
         UpdateTrayControlCenterView();
 
         PositionTrayControlCenterNearTray();
 
         _trayControlCenterWindow.AppWindow.Show();
         _trayControlCenterWindow.Activate();
+
+        _ = RefreshUsbDevicesAsync();
+        if (ShouldRefreshTrayGuestVmNetwork(force: false))
+        {
+            _ = RefreshGuestVmNetworkForTrayAsync(force: false);
+        }
     }
 
     private void PositionTrayControlCenterNearTray()
@@ -2723,6 +2743,13 @@ public sealed partial class App : Application
             return;
         }
 
+        if (!force && !ShouldRefreshTrayGuestVmNetwork(force: false))
+        {
+            _trayGuestVmNetworkStatusText = string.Empty;
+            UpdateTrayControlCenterView();
+            return;
+        }
+
         _isRefreshingTrayGuestVmNetwork = true;
         _trayGuestVmNetworkStatusText = force
             ? "Netzwerkdaten werden aktualisiert ..."
@@ -2732,19 +2759,7 @@ public sealed partial class App : Application
         try
         {
             var overview = await FetchGuestVmNetworkOverviewAsync();
-            _trayGuestVmNetworkOverview = overview;
-
-            var adapters = overview.Adapters ?? [];
-            if (adapters.Count == 0)
-            {
-                _traySelectedGuestVmNetworkAdapterName = string.Empty;
-            }
-            else if (string.IsNullOrWhiteSpace(_traySelectedGuestVmNetworkAdapterName)
-                || !adapters.Any(adapter =>
-                    string.Equals((adapter.Name ?? string.Empty).Trim(), _traySelectedGuestVmNetworkAdapterName, StringComparison.OrdinalIgnoreCase)))
-            {
-                _traySelectedGuestVmNetworkAdapterName = (adapters[0].Name ?? string.Empty).Trim();
-            }
+            ApplyTrayGuestVmNetworkState(overview, _traySelectedGuestVmNetworkAdapterName, persistCache: true);
 
             _trayGuestVmNetworkStatusText = string.Empty;
         }
@@ -2803,18 +2818,7 @@ public sealed partial class App : Application
             });
 
             var overview = await FetchGuestVmNetworkOverviewAsync();
-            _trayGuestVmNetworkOverview = overview;
-
-            var adapters = overview.Adapters ?? [];
-            if (adapters.Count == 0)
-            {
-                _traySelectedGuestVmNetworkAdapterName = string.Empty;
-            }
-            else if (!adapters.Any(adapter =>
-                string.Equals((adapter.Name ?? string.Empty).Trim(), _traySelectedGuestVmNetworkAdapterName, StringComparison.OrdinalIgnoreCase)))
-            {
-                _traySelectedGuestVmNetworkAdapterName = (adapters[0].Name ?? string.Empty).Trim();
-            }
+            ApplyTrayGuestVmNetworkState(overview, _traySelectedGuestVmNetworkAdapterName, persistCache: true);
 
             if (_mainWindow is not null)
             {
@@ -2831,6 +2835,182 @@ public sealed partial class App : Application
         {
             _isRefreshingTrayGuestVmNetwork = false;
             UpdateTrayControlCenterView();
+        }
+    }
+
+    private async Task<GuestVmNetworkSwitchCommandResult> SwitchGuestVmNetworkAdapterWithCacheSyncAsync(string adapterName, string switchName)
+    {
+        var result = await SwitchGuestVmNetworkAdapterAsync(adapterName, switchName);
+        if (!result.Success)
+        {
+            return result;
+        }
+
+        ApplyTrayGuestVmNetworkSwitchLocally(adapterName, switchName);
+        UpdateTrayControlCenterView();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(180);
+                await RefreshGuestVmNetworkForTrayAsync(force: true);
+            }
+            catch
+            {
+            }
+        });
+
+        return result;
+    }
+
+    private bool ShouldRefreshTrayGuestVmNetwork(bool force)
+    {
+        if (force)
+        {
+            return true;
+        }
+
+        if (_trayGuestVmNetworkCachedAtUtc == DateTimeOffset.MinValue)
+        {
+            return true;
+        }
+
+        return (DateTimeOffset.UtcNow - _trayGuestVmNetworkCachedAtUtc) >= TrayGuestNetworkCacheTtl;
+    }
+
+    private void ApplyTrayGuestVmNetworkSwitchLocally(string adapterName, string switchName)
+    {
+        var normalizedAdapterName = (adapterName ?? string.Empty).Trim();
+        var normalizedSwitchName = (switchName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedAdapterName) || string.IsNullOrWhiteSpace(normalizedSwitchName))
+        {
+            return;
+        }
+
+        var overview = _trayGuestVmNetworkOverview ?? new GuestVmNetworkOverviewResult();
+        var adapters = overview.Adapters ?? [];
+        var targetAdapter = adapters.FirstOrDefault(item =>
+            string.Equals((item.Name ?? string.Empty).Trim(), normalizedAdapterName, StringComparison.OrdinalIgnoreCase));
+
+        if (targetAdapter is null)
+        {
+            return;
+        }
+
+        targetAdapter.SwitchName = normalizedSwitchName;
+        _traySelectedGuestVmNetworkAdapterName = normalizedAdapterName;
+        _trayGuestVmNetworkCachedAtUtc = DateTimeOffset.UtcNow;
+        SaveTrayGuestVmNetworkCache();
+    }
+
+    private void ApplyTrayGuestVmNetworkState(GuestVmNetworkOverviewResult overview, string? preferredAdapterName, bool persistCache, DateTimeOffset? cachedAtUtc = null)
+    {
+        _trayGuestVmNetworkOverview = overview ?? new GuestVmNetworkOverviewResult();
+        var adapters = _trayGuestVmNetworkOverview.Adapters ?? [];
+
+        var candidateAdapterName = (preferredAdapterName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(candidateAdapterName))
+        {
+            candidateAdapterName = (_traySelectedGuestVmNetworkAdapterName ?? string.Empty).Trim();
+        }
+
+        if (adapters.Count == 0)
+        {
+            _traySelectedGuestVmNetworkAdapterName = string.Empty;
+        }
+        else
+        {
+            var found = adapters.Any(adapter =>
+                string.Equals((adapter.Name ?? string.Empty).Trim(), candidateAdapterName, StringComparison.OrdinalIgnoreCase));
+
+            _traySelectedGuestVmNetworkAdapterName = found
+                ? candidateAdapterName
+                : (adapters[0].Name ?? string.Empty).Trim();
+        }
+
+        _trayGuestVmNetworkCachedAtUtc = cachedAtUtc ?? DateTimeOffset.UtcNow;
+        if (persistCache)
+        {
+            SaveTrayGuestVmNetworkCache();
+        }
+    }
+
+    private string ResolveTrayGuestVmNetworkCachePath()
+    {
+        var configDirectory = Path.GetDirectoryName(_configPath);
+        var baseDirectory = string.IsNullOrWhiteSpace(configDirectory)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HyperTool")
+            : configDirectory;
+
+        return Path.Combine(baseDirectory, "cache", "guest-tray-network-cache.json");
+    }
+
+    private void SaveTrayGuestVmNetworkCache()
+    {
+        if (string.IsNullOrWhiteSpace(_trayGuestVmNetworkCachePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var directory = Path.GetDirectoryName(_trayGuestVmNetworkCachePath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var payload = new TrayGuestNetworkCachePayload
+            {
+                CachedAtUtc = _trayGuestVmNetworkCachedAtUtc,
+                SelectedAdapterName = _traySelectedGuestVmNetworkAdapterName,
+                Overview = _trayGuestVmNetworkOverview
+            };
+
+            var json = JsonSerializer.Serialize(payload);
+            File.WriteAllText(_trayGuestVmNetworkCachePath, json, Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            GuestLogger.Debug("network.tray.cache.save_failed", ex.Message, new
+            {
+                cachePath = _trayGuestVmNetworkCachePath,
+                exceptionType = ex.GetType().FullName
+            });
+        }
+    }
+
+    private void TryLoadTrayGuestVmNetworkCache()
+    {
+        if (string.IsNullOrWhiteSpace(_trayGuestVmNetworkCachePath) || !File.Exists(_trayGuestVmNetworkCachePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(_trayGuestVmNetworkCachePath, Encoding.UTF8);
+            var payload = JsonSerializer.Deserialize<TrayGuestNetworkCachePayload>(json);
+            if (payload?.Overview is null || payload.CachedAtUtc == DateTimeOffset.MinValue)
+            {
+                return;
+            }
+
+            if ((DateTimeOffset.UtcNow - payload.CachedAtUtc) > TrayGuestNetworkCacheFileMaxAge)
+            {
+                return;
+            }
+
+            ApplyTrayGuestVmNetworkState(payload.Overview, payload.SelectedAdapterName, persistCache: false, cachedAtUtc: payload.CachedAtUtc);
+        }
+        catch (Exception ex)
+        {
+            GuestLogger.Debug("network.tray.cache.load_failed", ex.Message, new
+            {
+                cachePath = _trayGuestVmNetworkCachePath,
+                exceptionType = ex.GetType().FullName
+            });
         }
     }
 

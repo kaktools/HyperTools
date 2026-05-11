@@ -152,8 +152,7 @@ internal sealed class GuestMainWindow : Window
     private Button? _usbDisconnectButton;
     private Button? _usbRuntimeInstallButton;
     private Button? _usbRuntimeRestartButton;
-    private readonly TextBlock _guestVmNetworkVmText = new() { Opacity = 0.92, TextWrapping = TextWrapping.Wrap, Text = "VM: -" };
-    private readonly TextBlock _guestVmNetworkStatusText = new() { Opacity = 0.88, TextWrapping = TextWrapping.Wrap, Text = "Bereit." };
+    private readonly TextBlock _guestVmNetworkStatusText = new() { Opacity = 0.88, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Text = "VM: - · 0 Adapter · 0 Switches" };
     private Button? _guestVmNetworkRefreshButton;
     private readonly StackPanel _guestVmNetworkAdapterCardsPanel = new() { Spacing = 10 };
     private IReadOnlyList<HostVmNetworkAdapterInfo> _guestVmNetworkAdapters = [];
@@ -1718,7 +1717,7 @@ internal sealed class GuestMainWindow : Window
 
     private UIElement BuildUsbPage()
     {
-        var root = new Grid { RowSpacing = 10 };
+        var root = new Grid { RowSpacing = 8 };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
@@ -3121,27 +3120,31 @@ internal sealed class GuestMainWindow : Window
             BorderThickness = new Thickness(1),
             BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush,
             Background = Application.Current.Resources["SurfaceSoftBrush"] as Brush,
-            Padding = new Thickness(10)
+            Padding = new Thickness(8)
         };
 
-        var controlStack = new StackPanel { Spacing = 8 };
-        controlStack.Children.Add(new TextBlock
+        var controlStack = new StackPanel { Spacing = 6 };
+
+        var headerGrid = new Grid();
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        headerGrid.Children.Add(new TextBlock
         {
             Text = "Guest VM Netzwerk",
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
         });
-        controlStack.Children.Add(_guestVmNetworkVmText);
-        controlStack.Children.Add(_guestVmNetworkStatusText);
-
-        var actionRow = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8
-        };
 
         _guestVmNetworkRefreshButton = CreateIconButton("⟳", "Refresh", onClick: async (_, _) => await RefreshGuestVmNetworkOverviewAsync());
-        actionRow.Children.Add(_guestVmNetworkRefreshButton);
-        controlStack.Children.Add(actionRow);
+        _guestVmNetworkRefreshButton.Padding = new Thickness(10, 0, 10, 0);
+        _guestVmNetworkRefreshButton.MinWidth = 104;
+        _guestVmNetworkRefreshButton.Height = 30;
+        _guestVmNetworkRefreshButton.HorizontalAlignment = HorizontalAlignment.Right;
+        Grid.SetColumn(_guestVmNetworkRefreshButton, 1);
+        headerGrid.Children.Add(_guestVmNetworkRefreshButton);
+
+        controlStack.Children.Add(headerGrid);
+        controlStack.Children.Add(_guestVmNetworkStatusText);
 
         controlCard.Child = controlStack;
         root.Children.Add(controlCard);
@@ -3236,15 +3239,14 @@ internal sealed class GuestMainWindow : Window
         if (overview.Success)
         {
             var vmName = string.IsNullOrWhiteSpace(overview.VmName) ? "-" : overview.VmName;
-            _guestVmNetworkVmText.Text = $"VM: {vmName}";
-            _guestVmNetworkStatusText.Text = $"{adapters.Count} Adapter · {switches.Count} Switches geladen.";
+            _guestVmNetworkStatusText.Text = $"VM: {vmName} · {adapters.Count} Adapter · {switches.Count} Switches";
         }
         else
         {
-            _guestVmNetworkVmText.Text = "VM: nicht auflösbar";
-            _guestVmNetworkStatusText.Text = string.IsNullOrWhiteSpace(overview.Message)
+            var message = string.IsNullOrWhiteSpace(overview.Message)
                 ? "Netzwerkdaten konnten nicht geladen werden."
                 : overview.Message;
+            _guestVmNetworkStatusText.Text = $"VM: nicht auflösbar · {message}";
         }
 
         UpdateGuestVmNetworkControlsState();

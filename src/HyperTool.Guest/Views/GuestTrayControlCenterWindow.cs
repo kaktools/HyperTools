@@ -456,26 +456,26 @@ internal sealed class GuestTrayControlCenterWindow : Window
             Opacity = 0.92
         });
 
-        _networkRefreshButton.Content = "⟳";
-        _networkRefreshButton.Width = 30;
+        _networkRefreshButton.Content = "⟳  Refresh";
+        _networkRefreshButton.MinWidth = 104;
         _networkRefreshButton.Height = 30;
         _networkRefreshButton.Style = CreateRoundedButtonStyle();
         _networkRefreshButton.HorizontalAlignment = HorizontalAlignment.Right;
         _networkRefreshButton.VerticalAlignment = VerticalAlignment.Center;
-        _networkRefreshButton.Padding = new Thickness(0);
+        _networkRefreshButton.HorizontalContentAlignment = HorizontalAlignment.Center;
+        _networkRefreshButton.Padding = new Thickness(10, 0, 10, 0);
         _networkRefreshButton.Click += (_, _) => NetworkRefreshRequested?.Invoke();
         ToolTipService.SetToolTip(_networkRefreshButton, "Netzwerk aktualisieren");
         Grid.SetColumn(_networkRefreshButton, 1);
         networkHeader.Children.Add(_networkRefreshButton);
 
         networkStack.Children.Add(networkHeader);
-        networkStack.Children.Add(_networkVmText);
-        networkStack.Children.Add(_networkStatusText);
 
         _networkAdapterCombo.MinHeight = 30;
         _networkAdapterCombo.MinWidth = 352;
         _networkAdapterCombo.CornerRadius = new CornerRadius(8);
         _networkAdapterCombo.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _networkAdapterCombo.Margin = new Thickness(0, 2, 0, 0);
         _networkAdapterCombo.PlaceholderText = "Netzwerkkarte auswählen";
         _networkAdapterCombo.SelectionChanged += (_, _) =>
         {
