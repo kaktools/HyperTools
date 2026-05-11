@@ -4,6 +4,8 @@
 
 ### Highlights
 
+- USB Geräte können jetzt direkt aus dem Guest connected werden und lösen ein share im Host aus.
+- USB Geräte können im Host gesperrt werden damit diese nicht im Guest auftauchen.
 - Host-Netzwerkverwaltung deutlich erweitert: Hyper-V-Switches können direkt in der App erstellt, bearbeitet und gelöscht werden.
 - VM-Netzwerkkarten sind vollständig adaptergenau verwaltbar (erstellen, bearbeiten, löschen, Switch pro Adapter auswählen).
 - Neue Guest-Tasktray-Netzwerkfunktion: Adapter auswählen, Switch direkt umstellen und Status sofort aktualisieren.
