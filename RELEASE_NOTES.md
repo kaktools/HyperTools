@@ -1,11 +1,13 @@
 # HyperTool Release Notes
 
-## v2.6.5
+## v2.6.6
 
 ### Highlights
 
 - Host-Netzwerkverwaltung deutlich erweitert: Hyper-V-Switches können direkt in der App erstellt, bearbeitet und gelöscht werden.
 - VM-Netzwerkkarten sind vollständig adaptergenau verwaltbar (erstellen, bearbeiten, löschen, Switch pro Adapter auswählen).
+- Neue Guest-Tasktray-Netzwerkfunktion: Adapter auswählen, Switch direkt umstellen und Status sofort aktualisieren.
+- USB-Share-Abläufe zwischen Host und Guest weiter stabilisiert und konsistenter synchronisiert.
 - Startpfade und Installer-Verhalten wurden für verwaltete Umgebungen robuster gemacht (weniger aggressive Elevation-/Legacy-Cleanup-Aufrufe).
 
 ### Verbessert
@@ -16,6 +18,11 @@
 	- VM-Kontextmenüs in Hauptansicht und Tray um Adapter-CRUD ergänzt.
 	- Netzwerkdaten (Switches, aktiver Adapterzustand) werden beim Start direkt geladen.
 	- Nach Adapter-Änderungen wird die VM-Adapterliste sofort nachgezogen (kein VM-Neuauswählen nötig).
+- Guest:
+	- Tray Control Center um einen Netzwerkbereich erweitert (Adapter-Auswahl, Switch-Chips, Refresh).
+	- Switch-Aktionen aus dem Tray laden den Zustand nach und synchronisieren den Netzwerkstand mit dem Hauptfenster.
+- USB-Share:
+	- Status- und Refresh-Verhalten zwischen Host und Guest in Share/Unshare/Detach-Pfaden weiter vereinheitlicht.
 - Startup/Installer:
 	- Startup-Elevation für Socket-Registrierung läuft nicht mehr aggressiv im Startpfad.
 	- Defendpoint-/Policy-sensitive Installer-Run-Aufrufe wurden reduziert.
@@ -24,11 +31,13 @@
 
 - Fälle behoben, in denen Netzwerkdaten erst nach manueller Interaktion vollständig sichtbar wurden.
 - Fälle behoben, in denen neue oder geänderte VM-Netzwerkkarten erst nach VM-Neuauswahl sichtbar wurden.
+- Fälle reduziert, in denen Switch-Umschaltungen bei vielen VMs spürbar träge wirkten.
+- Fälle reduziert, in denen Tray- und Hauptfenster-Zustand bei Guest-Netzwerkaktionen auseinanderlaufen konnten.
 
 ### Doku
 
-- README auf `v2.6.5` aktualisiert.
-- Hilfe-Fenster in Host und Guest auf den aktuellen Netzwerk-/Startstand angepasst.
+- README auf `v2.6.6` aktualisiert.
+- Hilfe-Fenster in Host und Guest auf USB-Share- und Netzwerk-Switch-Stand angepasst.
 
 ## v2.6.3
 

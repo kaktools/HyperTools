@@ -68,9 +68,11 @@ public sealed class HelpWindow : Window
         var bodyStack = new StackPanel { Spacing = 12 };
         bodyStack.Children.Add(CreateSection("USB Transport", "USB läuft ausschließlich über Hyper-V Socket. Der aktive Zustand wird direkt im USB-Bereich angezeigt."));
         bodyStack.Children.Add(CreateSection("USB Status", "Im USB-Menü steht oben rechts ein Aktiv/Inaktiv-Status-Chip. Ist USB durch den Host deaktiviert, erscheint im Tabellenbereich ein zentrierter Hinweis 'Deaktiviert'; nach Host-Aktivierung wird nach ca. 1 Sekunde automatisch neu geladen."));
+        bodyStack.Children.Add(CreateSection("USB-Share mit Host", "Share-, Unshare- und Detach-Zustände werden zwischen Host und Guest robuster synchronisiert. Dadurch bleibt die USB-Anzeige im Guest und im Host konsistenter."));
         bodyStack.Children.Add(CreateSection("Updates beim Start", "Wenn die Update-Prüfung beim Start aktiv ist und ein installierbares Update gefunden wird, erscheint ein Dialog mit 'Jetzt installieren' oder 'Später' - auch bei Start minimiert."));
         bodyStack.Children.Add(CreateSection("USB Auto-Connect", "Für das ausgewählte Gerät kann Auto-Connect aktiviert werden. Die Verbindung erfolgt dann automatisch nach einem Refresh."));
-        bodyStack.Children.Add(CreateSection("Rollenverteilung Host/Guest", "Switch- und VM-Netzwerkkartenverwaltung erfolgt im Host. Die Guest-App konzentriert sich auf USB-Client und Shared-Folder-Mounting."));
+        bodyStack.Children.Add(CreateSection("Rollenverteilung Host/Guest", "Die eigentliche Switch-Umschaltung erfolgt am Host. Im Guest gibt es dafür den Menüpunkt 'Netzwerk', der die passende VM/Adapter vom Host lädt und den gewünschten Switch-Wechsel auslöst."));
+        bodyStack.Children.Add(CreateSection("Netzwerk-Switch (neu)", "Das Guest Control Center im Tray enthält jetzt einen Netzwerkbereich mit Adapter-Auswahl und Switch-Chips. Ein Wechsel triggert den Host-Befehl und aktualisiert danach automatisch Tray und Hauptfenster."));
         bodyStack.Children.Add(CreateSection("Shared Folder", "Shared Folder läuft über Hyper-V Socket / HyperTool File Service und benötigt im Guest zusätzlich WinFsp. Der Bereich nutzt ebenfalls den Aktiv/Inaktiv-Status-Chip. Bei deaktivierter Funktion zeigt die Tabelle zentral 'Deaktiviert' und wird nach Reaktivierung automatisch aktualisiert."));
         bodyStack.Children.Add(CreateSection("Optionale Laufzeiten", "Fehlende Guest-Laufzeiten (usbip-win2 und WinFsp) lassen sich direkt aus der App nachinstallieren. Die Installation läuft still und nutzt zusätzliche Fallbacks, damit die Installation zuverlässiger abgeschlossen wird."));
         bodyStack.Children.Add(CreateSection("Shared Folder Anwenden", "Änderungen an einzelnen Shares werden gesammelt und erst über 'Änderungen anwenden' aktiv, damit laufende Zugriffe auf andere Shares stabil bleiben."));
@@ -78,7 +80,7 @@ public sealed class HelpWindow : Window
         bodyStack.Children.Add(CreateSection("Einstellungen", "Tasktray-Verhalten, Start mit Windows, Start minimiert, Updatecheck beim Start und Theme konfigurieren. Über 'Tool neu starten' wird die App mit kurzem Reload-Screen neu geladen."));
         bodyStack.Children.Add(CreateSection("Stabilität in Unternehmensumgebungen", "Start- und Installationspfade wurden für verwaltete Systeme robuster gemacht. Falls ein optionales Runtime-Setup nicht sofort durchläuft, kann es direkt aus der App erneut gestartet werden."));
         bodyStack.Children.Add(CreateSection("Single Instance", "Ein zweiter Start blendet die bereits laufende Guest-App ein."));
-        bodyStack.Children.Add(CreateSection("Tray Control Center", "Doppelklick links im Tray blendet die App ein/aus. Rechtsklick öffnet das USB-zentrierte Control Center mit Schnellaktionen."));
+        bodyStack.Children.Add(CreateSection("Tray Control Center", "Doppelklick links im Tray blendet die App ein/aus. Rechtsklick öffnet das Control Center mit USB- und Netzwerk-Schnellaktionen."));
         bodyStack.Children.Add(CreateSection("Logs", "'Logs öffnen' öffnet immer den Log-Ordner (nicht einzelne Dateien)."));
         bodyStack.Children.Add(CreateHiddenRainbowPrincessTrigger());
 

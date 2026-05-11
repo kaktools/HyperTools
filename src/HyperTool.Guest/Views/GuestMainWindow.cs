@@ -26,7 +26,7 @@ namespace HyperTool.Guest.Views;
 
 internal sealed class GuestMainWindow : Window
 {
-    private const int SettingsMenuIndex = 2;
+    private const int SettingsMenuIndex = 3;
 
     private enum UsbHostSearchStatusKind
     {
@@ -63,6 +63,9 @@ internal sealed class GuestMainWindow : Window
     private readonly Func<Task<(bool hyperVSocketActive, bool registryServiceOk)>> _runTransportDiagnosticsTestAsync;
     private readonly Func<Task<string?>> _discoverUsbHostAddressAsync;
     private readonly Func<Task<IReadOnlyList<HostSharedFolderDefinition>>> _fetchHostSharedFoldersAsync;
+    private readonly Func<Task<GuestVmNetworkOverviewResult>> _fetchGuestVmNetworkOverviewAsync;
+    private readonly Func<string, string, Task<GuestVmNetworkSwitchCommandResult>> _switchGuestVmNetworkAsync;
+    private readonly Func<Task> _refreshAfterGuestVmNetworkSwitchAsync;
     private bool _isUsbClientAvailable;
     private readonly IUpdateService _updateService = new GitHubUpdateService();
     private static readonly HttpClient UpdateDownloadClient = new();
@@ -149,6 +152,14 @@ internal sealed class GuestMainWindow : Window
     private Button? _usbDisconnectButton;
     private Button? _usbRuntimeInstallButton;
     private Button? _usbRuntimeRestartButton;
+    private readonly TextBlock _guestVmNetworkVmText = new() { Opacity = 0.92, TextWrapping = TextWrapping.Wrap, Text = "VM: -" };
+    private readonly TextBlock _guestVmNetworkStatusText = new() { Opacity = 0.88, TextWrapping = TextWrapping.Wrap, Text = "Bereit." };
+    private Button? _guestVmNetworkRefreshButton;
+    private readonly StackPanel _guestVmNetworkAdapterCardsPanel = new() { Spacing = 10 };
+    private IReadOnlyList<HostVmNetworkAdapterInfo> _guestVmNetworkAdapters = [];
+    private IReadOnlyList<HostVmSwitchInfo> _guestVmSwitches = [];
+    private bool _isRefreshingGuestVmNetwork;
+    private bool _isApplyingGuestVmNetworkSwitch;
     private readonly ComboBox _themeCombo = new();
     private readonly ToggleSwitch _themeToggle = new();
     private readonly TextBlock _themeText = new();
@@ -282,6 +293,7 @@ internal sealed class GuestMainWindow : Window
     private List<UIElement>? _startupMainElements;
     private UIElement? _usbPage;
     private UIElement? _sharedFoldersPage;
+    private UIElement? _networkPage;
     private UIElement? _settingsPage;
     private UIElement? _infoPage;
 
@@ -297,6 +309,9 @@ internal sealed class GuestMainWindow : Window
         Func<Task<(bool hyperVSocketActive, bool registryServiceOk)>> runTransportDiagnosticsTestAsync,
         Func<Task<string?>> discoverUsbHostAddressAsync,
         Func<Task<IReadOnlyList<HostSharedFolderDefinition>>> fetchHostSharedFoldersAsync,
+        Func<Task<GuestVmNetworkOverviewResult>> fetchGuestVmNetworkOverviewAsync,
+        Func<string, string, Task<GuestVmNetworkSwitchCommandResult>> switchGuestVmNetworkAsync,
+        Func<Task> refreshAfterGuestVmNetworkSwitchAsync,
         bool isUsbClientAvailable)
     {
         _config = config;
@@ -310,6 +325,9 @@ internal sealed class GuestMainWindow : Window
         _runTransportDiagnosticsTestAsync = runTransportDiagnosticsTestAsync;
         _discoverUsbHostAddressAsync = discoverUsbHostAddressAsync;
         _fetchHostSharedFoldersAsync = fetchHostSharedFoldersAsync;
+        _fetchGuestVmNetworkOverviewAsync = fetchGuestVmNetworkOverviewAsync;
+        _switchGuestVmNetworkAsync = switchGuestVmNetworkAsync;
+        _refreshAfterGuestVmNetworkSwitchAsync = refreshAfterGuestVmNetworkSwitchAsync;
         _isUsbClientAvailable = isUsbClientAvailable;
 
         Title = "HyperTool Guest";
@@ -354,7 +372,7 @@ internal sealed class GuestMainWindow : Window
             return;
         }
 
-        var normalized = Math.Clamp(index, 0, 3);
+        var normalized = Math.Clamp(index, 0, 4);
         if (_selectedMenuIndex == normalized)
         {
             return;
@@ -1108,8 +1126,9 @@ internal sealed class GuestMainWindow : Window
         var sidebarStack = new StackPanel { Spacing = 8 };
         sidebarStack.Children.Add(CreateNavButton("🔗", "USB", 0));
         sidebarStack.Children.Add(CreateNavButton("📁", "Shared Folder", 1));
-        sidebarStack.Children.Add(CreateNavButton("⚙", "Einstellungen", 2));
-        sidebarStack.Children.Add(CreateNavButton("ℹ", "Info", 3));
+        sidebarStack.Children.Add(CreateNavButton("🌐", "Netzwerk", 2));
+        sidebarStack.Children.Add(CreateNavButton("⚙", "Einstellungen", 3));
+        sidebarStack.Children.Add(CreateNavButton("ℹ", "Info", 4));
 
         sidebar.Child = new ScrollViewer
         {
@@ -3090,6 +3109,411 @@ internal sealed class GuestMainWindow : Window
         }
     }
 
+    private UIElement BuildNetworkPage()
+    {
+        var root = new Grid { RowSpacing = 10 };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+        var controlCard = new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            BorderThickness = new Thickness(1),
+            BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush,
+            Background = Application.Current.Resources["SurfaceSoftBrush"] as Brush,
+            Padding = new Thickness(10)
+        };
+
+        var controlStack = new StackPanel { Spacing = 8 };
+        controlStack.Children.Add(new TextBlock
+        {
+            Text = "Guest VM Netzwerk",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+        });
+        controlStack.Children.Add(_guestVmNetworkVmText);
+        controlStack.Children.Add(_guestVmNetworkStatusText);
+
+        var actionRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8
+        };
+
+        _guestVmNetworkRefreshButton = CreateIconButton("⟳", "Refresh", onClick: async (_, _) => await RefreshGuestVmNetworkOverviewAsync());
+        actionRow.Children.Add(_guestVmNetworkRefreshButton);
+        controlStack.Children.Add(actionRow);
+
+        controlCard.Child = controlStack;
+        root.Children.Add(controlCard);
+
+        var adapterCardHost = new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            BorderThickness = new Thickness(1),
+            BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush,
+            Background = Application.Current.Resources["PanelBackgroundBrush"] as Brush,
+            Padding = new Thickness(10)
+        };
+
+        adapterCardHost.Child = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Content = _guestVmNetworkAdapterCardsPanel
+        };
+
+        Grid.SetRow(adapterCardHost, 1);
+        root.Children.Add(adapterCardHost);
+
+        _ = RefreshGuestVmNetworkOverviewAsync();
+        return root;
+    }
+
+    private async Task RefreshGuestVmNetworkOverviewAsync()
+    {
+        if (_isRefreshingGuestVmNetwork)
+        {
+            return;
+        }
+
+        _isRefreshingGuestVmNetwork = true;
+        try
+        {
+            UpdateGuestVmNetworkControlsState();
+            _guestVmNetworkStatusText.Text = "Lade Netzwerkdaten vom Host ...";
+
+            var overview = await _fetchGuestVmNetworkOverviewAsync();
+            ApplyGuestVmNetworkOverviewToUi(overview);
+        }
+        catch (Exception ex)
+        {
+            _guestVmNetworkStatusText.Text = $"Netzwerkdaten konnten nicht geladen werden: {ex.Message}";
+            AppendNotification($"[Warn] Netzwerkdaten konnten nicht geladen werden: {ex.Message}");
+        }
+        finally
+        {
+            _isRefreshingGuestVmNetwork = false;
+            UpdateGuestVmNetworkControlsState();
+        }
+    }
+
+    public async Task RefreshGuestVmNetworkFromExternalAsync()
+    {
+        if (DispatcherQueue is { } queue && !queue.HasThreadAccess)
+        {
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!queue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await RefreshGuestVmNetworkOverviewAsync();
+                    completion.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            }))
+            {
+                return;
+            }
+
+            await completion.Task;
+            return;
+        }
+
+        await RefreshGuestVmNetworkOverviewAsync();
+    }
+
+    private void ApplyGuestVmNetworkOverviewToUi(GuestVmNetworkOverviewResult overview)
+    {
+        var adapters = overview.Adapters ?? [];
+        var switches = overview.Switches ?? [];
+
+        _guestVmNetworkAdapters = adapters;
+        _guestVmSwitches = switches;
+
+        if (overview.Success)
+        {
+            var vmName = string.IsNullOrWhiteSpace(overview.VmName) ? "-" : overview.VmName;
+            _guestVmNetworkVmText.Text = $"VM: {vmName}";
+            _guestVmNetworkStatusText.Text = $"{adapters.Count} Adapter · {switches.Count} Switches geladen.";
+        }
+        else
+        {
+            _guestVmNetworkVmText.Text = "VM: nicht auflösbar";
+            _guestVmNetworkStatusText.Text = string.IsNullOrWhiteSpace(overview.Message)
+                ? "Netzwerkdaten konnten nicht geladen werden."
+                : overview.Message;
+        }
+
+        UpdateGuestVmNetworkControlsState();
+    }
+
+    private void RebuildGuestVmNetworkAdapterCards()
+    {
+        _guestVmNetworkAdapterCardsPanel.Children.Clear();
+
+        if (_guestVmNetworkAdapters.Count == 0)
+        {
+            _guestVmNetworkAdapterCardsPanel.Children.Add(new TextBlock
+            {
+                Text = "Keine Netzwerkkarten für die zugeordnete VM gefunden.",
+                Opacity = 0.85,
+                TextWrapping = TextWrapping.Wrap
+            });
+            return;
+        }
+
+        foreach (var adapter in _guestVmNetworkAdapters.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var adapterName = (adapter.Name ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(adapterName))
+            {
+                continue;
+            }
+
+            var displayName = string.IsNullOrWhiteSpace(adapter.Name) ? "Network Adapter" : adapter.Name;
+            var switchDisplay = string.IsNullOrWhiteSpace(adapter.SwitchName) ? "Nicht verbunden" : adapter.SwitchName;
+
+            var card = new Border
+            {
+                CornerRadius = new CornerRadius(10),
+                BorderThickness = new Thickness(1),
+                BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush,
+                Background = Application.Current.Resources["PanelBackgroundBrush"] as Brush,
+                Padding = new Thickness(10)
+            };
+
+            var cardStack = new StackPanel { Spacing = 8 };
+            cardStack.Children.Add(new TextBlock
+            {
+                Text = displayName,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+            });
+            cardStack.Children.Add(new TextBlock
+            {
+                Text = $"Aktiv: {switchDisplay}",
+                Opacity = 0.8
+            });
+
+            var networkSummary = BuildGuestVmNetworkAddressSummary(adapter);
+            if (!string.IsNullOrWhiteSpace(networkSummary))
+            {
+                cardStack.Children.Add(new TextBlock
+                {
+                    Text = networkSummary,
+                    Opacity = 0.78,
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            var switchButtons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 8
+            };
+
+            foreach (var vmSwitch in _guestVmSwitches.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                var switchName = (vmSwitch.Name ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(switchName))
+                {
+                    continue;
+                }
+
+                var isActive = string.Equals(adapter.SwitchName, switchName, StringComparison.OrdinalIgnoreCase);
+                var switchButton = CreateIconButton("↔", isActive ? $"{switchName} (Aktiv)" : switchName, onClick: async (_, _) =>
+                {
+                    await ApplyGuestVmNetworkSwitchAsync(adapterName, switchName);
+                });
+
+                switchButton.IsEnabled = !_isRefreshingGuestVmNetwork && !_isApplyingGuestVmNetworkSwitch;
+
+                if (isActive)
+                {
+                    switchButton.Background = Application.Current.Resources["AccentSoftBrush"] as Brush;
+                    switchButton.BorderBrush = Application.Current.Resources["AccentBrush"] as Brush;
+                }
+
+                switchButtons.Children.Add(switchButton);
+            }
+
+            if (switchButtons.Children.Count == 0)
+            {
+                cardStack.Children.Add(new TextBlock
+                {
+                    Text = "Keine Switches vom Host verfügbar.",
+                    Opacity = 0.78
+                });
+            }
+            else
+            {
+                cardStack.Children.Add(new ScrollViewer
+                {
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Content = switchButtons
+                });
+            }
+
+            card.Child = cardStack;
+            _guestVmNetworkAdapterCardsPanel.Children.Add(card);
+        }
+
+        if (_guestVmNetworkAdapterCardsPanel.Children.Count == 0)
+        {
+            _guestVmNetworkAdapterCardsPanel.Children.Add(new TextBlock
+            {
+                Text = "Keine gültigen Netzwerkkarten gefunden.",
+                Opacity = 0.85,
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+    }
+
+    private static string BuildGuestVmNetworkAddressSummary(HostVmNetworkAdapterInfo adapter)
+    {
+        var ipv4 = (adapter.Ipv4Address ?? string.Empty).Trim();
+        var subnet = (adapter.Ipv4SubnetMask ?? string.Empty).Trim();
+        var gateway = (adapter.Ipv4Gateway ?? string.Empty).Trim();
+        var guestName = (adapter.GuestComputerName ?? string.Empty).Trim();
+
+        if (!string.IsNullOrWhiteSpace(ipv4))
+        {
+            var details = new List<string>
+            {
+                $"IPv4: {ipv4}"
+            };
+
+            if (!string.IsNullOrWhiteSpace(subnet))
+            {
+                details.Add($"Maske: {subnet}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(gateway))
+            {
+                details.Add($"Gateway: {gateway}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(guestName))
+            {
+                details.Add($"Guest: {guestName}");
+            }
+
+            return string.Join(" | ", details);
+        }
+
+        var ipFallback = (adapter.IpAddresses ?? [])
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Select(item => item.Trim())
+            .ToList();
+
+        if (ipFallback.Count > 0)
+        {
+            var ipText = $"IP: {string.Join(", ", ipFallback)}";
+            if (string.IsNullOrWhiteSpace(guestName))
+            {
+                return ipText;
+            }
+
+            return $"{ipText} | Guest: {guestName}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(guestName))
+        {
+            return $"Guest: {guestName}";
+        }
+
+        return string.Empty;
+    }
+
+    private async Task ApplyGuestVmNetworkSwitchAsync(string adapterName, string switchName)
+    {
+        if (_isApplyingGuestVmNetworkSwitch)
+        {
+            return;
+        }
+
+        adapterName = (adapterName ?? string.Empty).Trim();
+        switchName = (switchName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(adapterName) || string.IsNullOrWhiteSpace(switchName))
+        {
+            _guestVmNetworkStatusText.Text = "Adapter oder Switch ist ungültig.";
+            return;
+        }
+
+        var currentAdapter = _guestVmNetworkAdapters.FirstOrDefault(item =>
+            string.Equals((item.Name ?? string.Empty).Trim(), adapterName, StringComparison.OrdinalIgnoreCase));
+
+        if (currentAdapter is not null
+            && string.Equals((currentAdapter.SwitchName ?? string.Empty).Trim(), switchName, StringComparison.OrdinalIgnoreCase))
+        {
+            _guestVmNetworkStatusText.Text = $"Adapter '{adapterName}' ist bereits mit '{switchName}' verbunden.";
+            return;
+        }
+
+        _isApplyingGuestVmNetworkSwitch = true;
+        try
+        {
+            UpdateGuestVmNetworkControlsState();
+            _guestVmNetworkStatusText.Text = $"Stelle Adapter '{adapterName}' auf '{switchName}' um ...";
+
+            var result = await _switchGuestVmNetworkAsync(adapterName, switchName);
+            if (!result.Success)
+            {
+                var message = string.IsNullOrWhiteSpace(result.Message)
+                    ? "Switch konnte nicht umgestellt werden."
+                    : result.Message;
+                _guestVmNetworkStatusText.Text = message;
+                AppendNotification($"[Warn] {message}");
+                return;
+            }
+
+            var vmText = string.IsNullOrWhiteSpace(result.VmName)
+                ? ""
+                : $" auf VM '{result.VmName}'";
+
+            _guestVmNetworkStatusText.Text = $"Adapter '{adapterName}' wurde auf '{switchName}' umgestellt{vmText}.";
+            AppendNotification($"[Info] Netzwerk-Switch erfolgreich geändert{vmText}.");
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await _refreshAfterGuestVmNetworkSwitchAsync();
+                }
+                catch
+                {
+                }
+            });
+
+            await RefreshGuestVmNetworkOverviewAsync();
+        }
+        catch (Exception ex)
+        {
+            _guestVmNetworkStatusText.Text = $"Switch konnte nicht umgestellt werden: {ex.Message}";
+            AppendNotification($"[Warn] Switch konnte nicht umgestellt werden: {ex.Message}");
+        }
+        finally
+        {
+            _isApplyingGuestVmNetworkSwitch = false;
+            UpdateGuestVmNetworkControlsState();
+        }
+    }
+
+    private void UpdateGuestVmNetworkControlsState()
+    {
+        var busy = _isRefreshingGuestVmNetwork || _isApplyingGuestVmNetworkSwitch;
+
+        if (_guestVmNetworkRefreshButton is not null)
+        {
+            _guestVmNetworkRefreshButton.IsEnabled = !busy;
+        }
+
+        RebuildGuestVmNetworkAdapterCards();
+    }
+
     private UIElement BuildSettingsPage()
     {
         var root = new StackPanel { Spacing = 12 };
@@ -3280,24 +3704,11 @@ internal sealed class GuestMainWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Opacity = 0.9
         });
-        usbHeaderTextStack.Children.Add(usbHeaderTitleRow);
-        usbHeaderGrid.Children.Add(usbHeaderTextStack);
-
-        Grid.SetColumn(modeBadgeRow, 1);
-        usbHeaderGrid.Children.Add(modeBadgeRow);
-        usbStack.Children.Add(usbHeaderGrid);
-
-        _usbModeHintText.Foreground = Application.Current.Resources["TextMutedBrush"] as Brush;
-        usbStack.Children.Add(_usbModeHintText);
-
         var usbHostDiscoveryRow = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            VerticalAlignment = VerticalAlignment.Center
         };
         _usbHostSearchButton = CreateIconButton("🔎", "Hostname aktualisieren", onClick: async (_, _) => await SearchUsbHostAddressAsync());
-        _usbHostSearchButton.HorizontalAlignment = HorizontalAlignment.Left;
         _usbHostSearchButton.VerticalAlignment = VerticalAlignment.Center;
         usbHostDiscoveryRow.Children.Add(_usbHostSearchButton);
         SetUsbHostSearchStatus("Bereit", UsbHostSearchStatusKind.Neutral);
@@ -3556,7 +3967,8 @@ internal sealed class GuestMainWindow : Window
         {
             0 => _usbPage ??= BuildUsbPage(),
             1 => _sharedFoldersPage ??= BuildSharedFoldersPage(),
-            2 => GetOrCreateSettingsPage(),
+            2 => _networkPage ??= BuildNetworkPage(),
+            3 => GetOrCreateSettingsPage(),
             _ => _infoPage ??= BuildInfoPage()
         };
     }

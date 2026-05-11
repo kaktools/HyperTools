@@ -688,6 +688,56 @@ public sealed class HyperVPowerShellService : IHyperVService
         }).ToList();
     }
 
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<HyperVVmNetworkAdapterInfo>>> GetAllVmNetworkAdaptersAsync(CancellationToken cancellationToken)
+    {
+        const string script = "@(" +
+                              "Get-VM -ErrorAction SilentlyContinue | ForEach-Object { " +
+                              "  $vmName = if ($null -ne $_.Name) { $_.Name } else { '' }; " +
+                              "  if ([string]::IsNullOrWhiteSpace($vmName)) { return }; " +
+                              "  Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue | ForEach-Object { " +
+                              "    [pscustomobject]@{ " +
+                              "      VmName = $vmName; " +
+                              "      Name = if ($null -ne $_.Name) { $_.Name } else { '' }; " +
+                              "      SwitchName = if ($null -ne $_.SwitchName) { $_.SwitchName } else { '' }; " +
+                              "      MacAddress = if ($null -ne $_.MacAddress) { $_.MacAddress } else { '' }; " +
+                              "      IpAddresses = @($_.IPAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) " +
+                              "    } " +
+                              "  } " +
+                              "}" +
+                              ") | ConvertTo-Json -Depth 6 -Compress";
+
+        var rows = await InvokeJsonArrayAsync(script, cancellationToken);
+        var grouped = new Dictionary<string, List<HyperVVmNetworkAdapterInfo>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var row in rows)
+        {
+            var vmName = GetString(row, "VmName").Trim();
+            if (string.IsNullOrWhiteSpace(vmName))
+            {
+                continue;
+            }
+
+            if (!grouped.TryGetValue(vmName, out var vmAdapters))
+            {
+                vmAdapters = [];
+                grouped[vmName] = vmAdapters;
+            }
+
+            vmAdapters.Add(new HyperVVmNetworkAdapterInfo
+            {
+                Name = GetString(row, "Name"),
+                SwitchName = GetString(row, "SwitchName"),
+                MacAddress = GetString(row, "MacAddress"),
+                IpAddresses = GetStringList(row, "IpAddresses")
+            });
+        }
+
+        return grouped.ToDictionary(
+            static pair => pair.Key,
+            static pair => (IReadOnlyList<HyperVVmNetworkAdapterInfo>)pair.Value,
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     public async Task<string?> GetVmCurrentSwitchNameAsync(string vmName, CancellationToken cancellationToken)
     {
         var script = $"$adapter = Get-VMNetworkAdapter -VMName {ToPsSingleQuoted(vmName)} -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -eq $adapter -or $null -eq $adapter.SwitchName) {{ '' }} else {{ $adapter.SwitchName }}";

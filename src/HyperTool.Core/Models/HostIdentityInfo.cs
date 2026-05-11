@@ -63,3 +63,83 @@ public sealed class HostUsbShareCommandResult
 
     public string Message { get; set; } = string.Empty;
 }
+
+public sealed class GuestVmNetworkOverviewRequest
+{
+    public string SourceVmId { get; set; } = string.Empty;
+
+    public string GuestComputerName { get; set; } = string.Empty;
+}
+
+public sealed class GuestVmNetworkOverviewResult
+{
+    public bool Success { get; set; }
+
+    public string VmName { get; set; } = string.Empty;
+
+    public string VmId { get; set; } = string.Empty;
+
+    public string ErrorCode { get; set; } = string.Empty;
+
+    public string Message { get; set; } = string.Empty;
+
+    public List<HostVmNetworkAdapterInfo> Adapters { get; set; } = [];
+
+    public List<HostVmSwitchInfo> Switches { get; set; } = [];
+}
+
+public sealed class HostVmNetworkAdapterInfo
+{
+    public string Name { get; set; } = string.Empty;
+
+    public string SwitchName { get; set; } = string.Empty;
+
+    public string MacAddress { get; set; } = string.Empty;
+
+    public List<string> IpAddresses { get; set; } = [];
+
+    public string Ipv4Address { get; set; } = string.Empty;
+
+    public string Ipv4SubnetMask { get; set; } = string.Empty;
+
+    public string Ipv4Gateway { get; set; } = string.Empty;
+
+    public string GuestComputerName { get; set; } = string.Empty;
+}
+
+public sealed class HostVmSwitchInfo
+{
+    public string Name { get; set; } = string.Empty;
+
+    public string SwitchType { get; set; } = string.Empty;
+
+    public string NetAdapterInterfaceDescription { get; set; } = string.Empty;
+}
+
+public sealed class GuestVmNetworkSwitchCommandRequest
+{
+    public string SourceVmId { get; set; } = string.Empty;
+
+    public string GuestComputerName { get; set; } = string.Empty;
+
+    public string AdapterName { get; set; } = string.Empty;
+
+    public string SwitchName { get; set; } = string.Empty;
+}
+
+public sealed class GuestVmNetworkSwitchCommandResult
+{
+    public bool Success { get; set; }
+
+    public string VmName { get; set; } = string.Empty;
+
+    public string VmId { get; set; } = string.Empty;
+
+    public string AdapterName { get; set; } = string.Empty;
+
+    public string SwitchName { get; set; } = string.Empty;
+
+    public string ErrorCode { get; set; } = string.Empty;
+
+    public string Message { get; set; } = string.Empty;
+}

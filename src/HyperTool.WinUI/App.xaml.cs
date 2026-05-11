@@ -3771,6 +3771,38 @@ public sealed partial class App : Application
                     }
 
                     return await _mainViewModel.EnsureUsbSharedByBusIdAsync(request, cancellationToken);
+                },
+                guestVmNetworkOverviewHandler: async (request, cancellationToken) =>
+                {
+                    if (_mainViewModel is null)
+                    {
+                        return new GuestVmNetworkOverviewResult
+                        {
+                            Success = false,
+                            ErrorCode = "host_not_ready",
+                            Message = "Host ist noch nicht bereit."
+                        };
+                    }
+
+                    return await _mainViewModel.GetGuestVmNetworkOverviewAsync(request, cancellationToken);
+                },
+                guestVmNetworkSwitchHandler: async (request, cancellationToken) =>
+                {
+                    if (_mainViewModel is null)
+                    {
+                        return new GuestVmNetworkSwitchCommandResult
+                        {
+                            Success = false,
+                            AdapterName = (request.AdapterName ?? string.Empty).Trim(),
+                            SwitchName = (request.SwitchName ?? string.Empty).Trim(),
+                            ErrorCode = "host_not_ready",
+                            Message = "Host ist noch nicht bereit."
+                        };
+                    }
+
+                    var switchResult = await _mainViewModel.SwitchGuestVmNetworkAdapterAsync(request, cancellationToken);
+                    ScheduleVmUiRefreshAfterGuestVmSwitch(switchResult);
+                    return switchResult;
                 });
             _hostIdentityHostListener.Start();
             Log.Information(isThemeRestart
@@ -3825,6 +3857,38 @@ public sealed partial class App : Application
                     }
 
                     return await _mainViewModel.EnsureUsbSharedByBusIdAsync(request, cancellationToken);
+                },
+                guestVmNetworkOverviewHandler: async (request, cancellationToken) =>
+                {
+                    if (_mainViewModel is null)
+                    {
+                        return new GuestVmNetworkOverviewResult
+                        {
+                            Success = false,
+                            ErrorCode = "host_not_ready",
+                            Message = "Host ist noch nicht bereit."
+                        };
+                    }
+
+                    return await _mainViewModel.GetGuestVmNetworkOverviewAsync(request, cancellationToken);
+                },
+                guestVmNetworkSwitchHandler: async (request, cancellationToken) =>
+                {
+                    if (_mainViewModel is null)
+                    {
+                        return new GuestVmNetworkSwitchCommandResult
+                        {
+                            Success = false,
+                            AdapterName = (request.AdapterName ?? string.Empty).Trim(),
+                            SwitchName = (request.SwitchName ?? string.Empty).Trim(),
+                            ErrorCode = "host_not_ready",
+                            Message = "Host ist noch nicht bereit."
+                        };
+                    }
+
+                    var switchResult = await _mainViewModel.SwitchGuestVmNetworkAdapterAsync(request, cancellationToken);
+                    ScheduleVmUiRefreshAfterGuestVmSwitch(switchResult);
+                    return switchResult;
                 });
             _hostIdentityHostListener.Start();
             Log.Information("Hyper-V socket host-identity listener started after elevated registration helper.");
@@ -4086,6 +4150,59 @@ public sealed partial class App : Application
         }
 
         await tcs.Task.WaitAsync(token);
+    }
+
+    private void ScheduleVmUiRefreshAfterGuestVmSwitch(GuestVmNetworkSwitchCommandResult switchResult)
+    {
+        if (!switchResult.Success || _mainViewModel is null)
+        {
+            return;
+        }
+
+        var selectedVm = _mainViewModel.SelectedVm;
+        if (selectedVm is null)
+        {
+            return;
+        }
+
+        var resultVmId = (switchResult.VmId ?? string.Empty).Trim();
+        var resultVmName = (switchResult.VmName ?? string.Empty).Trim();
+        var selectedVmId = (selectedVm.VmId ?? string.Empty).Trim();
+        var selectedVmName = (selectedVm.Name ?? string.Empty).Trim();
+
+        var isSameVm = (!string.IsNullOrWhiteSpace(resultVmId)
+                && string.Equals(resultVmId, selectedVmId, StringComparison.OrdinalIgnoreCase))
+            || (!string.IsNullOrWhiteSpace(resultVmName)
+                && string.Equals(resultVmName, selectedVmName, StringComparison.OrdinalIgnoreCase));
+
+        if (!isSameVm)
+        {
+            return;
+        }
+
+        async Task refreshAsync()
+        {
+            try
+            {
+                await _mainViewModel.RefreshVmStatusCommand.ExecuteAsync(null);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "VM network cards refresh after guest switch failed.");
+            }
+        }
+
+        var uiQueue = _mainWindow?.DispatcherQueue;
+        if (uiQueue is null || uiQueue.HasThreadAccess)
+        {
+            _ = refreshAsync();
+            return;
+        }
+
+        _ = uiQueue.TryEnqueue(() =>
+        {
+            _ = refreshAsync();
+        });
     }
 
     private async Task DispatchGuestResourceMonitoringAsync(ResourceMonitorPacket packet)

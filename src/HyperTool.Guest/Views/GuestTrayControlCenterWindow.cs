@@ -17,12 +17,18 @@ internal sealed class GuestTrayControlCenterWindow : Window
 {
     private const int PanelCornerRadius = 18;
     public const int PopupWidth = 428;
-    public const int PopupHeightWithUsb = 308;
+    public const int PopupHeightWithUsb = 432;
     public const int PopupHeightCompact = 184;
     private readonly Grid _windowRoot = new();
     private readonly Border _panelRoot = new();
     private readonly Border _headerBorder = new();
+    private readonly Border _networkCard = new();
     private readonly Border _usbCard = new();
+    private readonly TextBlock _networkVmText = new() { Opacity = 0.92, Text = "VM: -" };
+    private readonly TextBlock _networkStatusText = new() { Opacity = 0.88, Text = "Bereit." };
+    private readonly ComboBox _networkAdapterCombo = new();
+    private readonly StackPanel _switchChipPanel = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
+    private readonly Button _networkRefreshButton = new();
     private readonly ComboBox _usbDeviceCombo = new();
     private readonly Button _refreshButton = new();
     private readonly Button _usbConnectButton = new();
@@ -32,12 +38,17 @@ internal sealed class GuestTrayControlCenterWindow : Window
     private readonly Button _closeButton = new();
 
     private bool _isUpdatingUsbSelection;
+    private bool _isUpdatingNetworkAdapterSelection;
     private bool _isTrayMenuEnabled = true;
     private string? _lastUsbRenderKey;
+    private string? _lastNetworkRenderKey;
     private SizeInt32 _currentScaledPanelSize;
 
     public event Action? CloseRequested;
     public event Action? RefreshUsbRequested;
+    public event Action? NetworkRefreshRequested;
+    public event Action<string>? NetworkAdapterSelected;
+    public event Action<string>? NetworkSwitchRequested;
     public event Action<string>? UsbSelected;
     public event Action? UsbConnectRequested;
     public event Action? UsbDisconnectRequested;
@@ -98,14 +109,23 @@ internal sealed class GuestTrayControlCenterWindow : Window
         _usbCard.Background = new SolidColorBrush(cardBackground);
         _usbCard.BorderBrush = new SolidColorBrush(actionButtonBorder);
         _usbCard.BorderThickness = new Thickness(1);
+        _networkCard.Background = new SolidColorBrush(cardBackground);
+        _networkCard.BorderBrush = new SolidColorBrush(actionButtonBorder);
+        _networkCard.BorderThickness = new Thickness(1);
 
         _usbDeviceCombo.Background = new SolidColorBrush(cardBackground);
         _usbDeviceCombo.Foreground = new SolidColorBrush(textPrimary);
         _usbDeviceCombo.BorderBrush = new SolidColorBrush(actionButtonBorder);
+        _networkAdapterCombo.Background = new SolidColorBrush(cardBackground);
+        _networkAdapterCombo.Foreground = new SolidColorBrush(textPrimary);
+        _networkAdapterCombo.BorderBrush = new SolidColorBrush(actionButtonBorder);
+        _networkVmText.Foreground = new SolidColorBrush(textPrimary);
+        _networkStatusText.Foreground = new SolidColorBrush(textSecondary);
 
         ApplyButtonColors(_refreshButton, actionButtonBackground, actionButtonForeground, actionButtonBorder);
         ApplyButtonColors(_usbConnectButton, actionButtonBackground, actionButtonForeground, actionButtonBorder);
         ApplyButtonColors(_usbDisconnectButton, actionButtonBackground, actionButtonForeground, actionButtonBorder);
+        ApplyButtonColors(_networkRefreshButton, actionButtonBackground, actionButtonForeground, actionButtonBorder);
         ApplyButtonColors(_visibilityButton, actionButtonBackground, actionButtonForeground, actionButtonBorder);
         ApplyButtonColors(_exitButton, actionButtonBackground, actionButtonForeground, actionButtonBorder);
         ApplyButtonColors(_closeButton, actionButtonBackground, actionButtonForeground, actionButtonBorder);
@@ -141,10 +161,17 @@ internal sealed class GuestTrayControlCenterWindow : Window
         string? selectedBusId,
         bool isMainWindowVisible,
         bool isTrayMenuEnabled,
-        bool isUsbClientAvailable)
+        bool isUsbClientAvailable,
+        GuestVmNetworkOverviewResult? networkOverview,
+        string? selectedNetworkAdapterName,
+        bool isNetworkBusy,
+        string? networkStatusOverride)
     {
         _isTrayMenuEnabled = isTrayMenuEnabled;
+        _networkCard.Visibility = isTrayMenuEnabled ? Visibility.Visible : Visibility.Collapsed;
         _usbCard.Visibility = isTrayMenuEnabled ? Visibility.Visible : Visibility.Collapsed;
+
+        ApplyNetworkView(networkOverview, selectedNetworkAdapterName, isNetworkBusy, networkStatusOverride);
 
         var usbRenderKey = string.Join('|', devices.Select(device => $"{device.BusId}:{device.DisplayName}:{device.CustomComment}"));
         if (!string.Equals(_lastUsbRenderKey, usbRenderKey, StringComparison.Ordinal))
@@ -195,6 +222,156 @@ internal sealed class GuestTrayControlCenterWindow : Window
         SetPanelSize(PopupWidth, isTrayMenuEnabled ? PopupHeightWithUsb : PopupHeightCompact);
     }
 
+    private void ApplyNetworkView(
+        GuestVmNetworkOverviewResult? networkOverview,
+        string? selectedNetworkAdapterName,
+        bool isNetworkBusy,
+        string? networkStatusOverride)
+    {
+        var overview = networkOverview ?? new GuestVmNetworkOverviewResult();
+        var adapters = overview.Adapters ?? [];
+        var switches = overview.Switches ?? [];
+
+        var vmName = string.IsNullOrWhiteSpace(overview.VmName) ? "-" : overview.VmName.Trim();
+        _networkVmText.Text = $"VM: {vmName}";
+
+        if (!string.IsNullOrWhiteSpace(networkStatusOverride))
+        {
+            _networkStatusText.Text = networkStatusOverride.Trim();
+        }
+        else if (overview.Success)
+        {
+            _networkStatusText.Text = $"{adapters.Count} Adapter · {switches.Count} Switches";
+        }
+        else
+        {
+            _networkStatusText.Text = string.IsNullOrWhiteSpace(overview.Message)
+                ? "Netzwerkdaten nicht verfügbar."
+                : overview.Message.Trim();
+        }
+
+        var adapterRenderKey = string.Join('|', adapters.Select(item => $"{item.Name}:{item.SwitchName}"));
+        if (!string.Equals(_lastNetworkRenderKey, adapterRenderKey, StringComparison.Ordinal))
+        {
+            _lastNetworkRenderKey = adapterRenderKey;
+            _isUpdatingNetworkAdapterSelection = true;
+            try
+            {
+                _networkAdapterCombo.Items.Clear();
+                foreach (var adapter in adapters)
+                {
+                    var adapterName = (adapter.Name ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(adapterName))
+                    {
+                        continue;
+                    }
+
+                    var switchName = string.IsNullOrWhiteSpace(adapter.SwitchName)
+                        ? "Nicht verbunden"
+                        : adapter.SwitchName.Trim();
+
+                    _networkAdapterCombo.Items.Add(new ComboBoxItem
+                    {
+                        Content = $"{adapterName} ({switchName})",
+                        Tag = adapterName
+                    });
+                }
+            }
+            finally
+            {
+                _isUpdatingNetworkAdapterSelection = false;
+            }
+        }
+
+        var targetAdapterIndex = -1;
+        var normalizedSelectedAdapterName = (selectedNetworkAdapterName ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(normalizedSelectedAdapterName))
+        {
+            for (var index = 0; index < _networkAdapterCombo.Items.Count; index++)
+            {
+                if (_networkAdapterCombo.Items[index] is ComboBoxItem item
+                    && string.Equals(item.Tag?.ToString(), normalizedSelectedAdapterName, StringComparison.OrdinalIgnoreCase))
+                {
+                    targetAdapterIndex = index;
+                    break;
+                }
+            }
+        }
+
+        if (targetAdapterIndex < 0 && _networkAdapterCombo.Items.Count > 0)
+        {
+            targetAdapterIndex = 0;
+        }
+
+        if (_networkAdapterCombo.SelectedIndex != targetAdapterIndex)
+        {
+            _isUpdatingNetworkAdapterSelection = true;
+            try
+            {
+                _networkAdapterCombo.SelectedIndex = targetAdapterIndex;
+            }
+            finally
+            {
+                _isUpdatingNetworkAdapterSelection = false;
+            }
+        }
+
+        _networkAdapterCombo.IsEnabled = !isNetworkBusy && _networkAdapterCombo.Items.Count > 1 && overview.Success;
+        _networkRefreshButton.IsEnabled = !isNetworkBusy;
+
+        var selectedAdapter = adapters.FirstOrDefault(adapter =>
+            string.Equals((adapter.Name ?? string.Empty).Trim(), (_networkAdapterCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString(), StringComparison.OrdinalIgnoreCase));
+
+        _switchChipPanel.Children.Clear();
+        foreach (var vmSwitch in switches)
+        {
+            var switchName = (vmSwitch.Name ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(switchName))
+            {
+                continue;
+            }
+
+            var isActive = string.Equals((selectedAdapter?.SwitchName ?? string.Empty).Trim(), switchName, StringComparison.OrdinalIgnoreCase);
+            var chip = new Button
+            {
+                Content = isActive ? $"{switchName} (Aktiv)" : switchName,
+                CornerRadius = new CornerRadius(14),
+                Padding = new Thickness(10, 4, 10, 4),
+                BorderThickness = new Thickness(1),
+                FontSize = 12,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                MinHeight = 28,
+                IsEnabled = !isNetworkBusy && overview.Success && selectedAdapter is not null
+            };
+
+            if (isActive)
+            {
+                chip.Background = Application.Current.Resources["AccentSoftBrush"] as Brush;
+                chip.BorderBrush = Application.Current.Resources["AccentBrush"] as Brush;
+            }
+            else
+            {
+                chip.Background = Application.Current.Resources["SurfaceSoftBrush"] as Brush;
+                chip.BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush;
+            }
+
+            var requestedSwitch = switchName;
+            chip.Click += (_, _) => NetworkSwitchRequested?.Invoke(requestedSwitch);
+            _switchChipPanel.Children.Add(chip);
+        }
+
+        if (_switchChipPanel.Children.Count == 0)
+        {
+            _switchChipPanel.Children.Add(new TextBlock
+            {
+                Text = overview.Success ? "Keine Switches verfügbar" : "Netzwerkdaten nicht verfügbar",
+                Opacity = 0.8,
+                FontSize = 12
+            });
+        }
+    }
+
     private static string BuildUsbComboLabel(UsbIpDeviceInfo usb)
     {
         var label = usb.DisplayName;
@@ -222,7 +399,7 @@ internal sealed class GuestTrayControlCenterWindow : Window
         _panelRoot.Padding = new Thickness(12);
         _panelRoot.Shadow = new ThemeShadow();
 
-        var stack = new StackPanel { Spacing = 10 };
+        var stack = new StackPanel { Spacing = 8 };
 
         _headerBorder.CornerRadius = new CornerRadius(14);
         _headerBorder.Padding = new Thickness(12, 10, 10, 10);
@@ -261,6 +438,68 @@ internal sealed class GuestTrayControlCenterWindow : Window
 
         _headerBorder.Child = headerGrid;
         stack.Children.Add(_headerBorder);
+
+        _networkCard.CornerRadius = new CornerRadius(14);
+        _networkCard.Padding = new Thickness(10);
+        _networkCard.Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x19, 0x25, 0x41));
+
+        var networkStack = new StackPanel { Spacing = 6 };
+
+        var networkHeader = new Grid();
+        networkHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        networkHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        networkHeader.Children.Add(new TextBlock
+        {
+            Text = "Netzwerk",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Opacity = 0.92
+        });
+
+        _networkRefreshButton.Content = "⟳";
+        _networkRefreshButton.Width = 30;
+        _networkRefreshButton.Height = 30;
+        _networkRefreshButton.Style = CreateRoundedButtonStyle();
+        _networkRefreshButton.HorizontalAlignment = HorizontalAlignment.Right;
+        _networkRefreshButton.VerticalAlignment = VerticalAlignment.Center;
+        _networkRefreshButton.Padding = new Thickness(0);
+        _networkRefreshButton.Click += (_, _) => NetworkRefreshRequested?.Invoke();
+        ToolTipService.SetToolTip(_networkRefreshButton, "Netzwerk aktualisieren");
+        Grid.SetColumn(_networkRefreshButton, 1);
+        networkHeader.Children.Add(_networkRefreshButton);
+
+        networkStack.Children.Add(networkHeader);
+        networkStack.Children.Add(_networkVmText);
+        networkStack.Children.Add(_networkStatusText);
+
+        _networkAdapterCombo.MinHeight = 30;
+        _networkAdapterCombo.MinWidth = 352;
+        _networkAdapterCombo.CornerRadius = new CornerRadius(8);
+        _networkAdapterCombo.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _networkAdapterCombo.PlaceholderText = "Netzwerkkarte auswählen";
+        _networkAdapterCombo.SelectionChanged += (_, _) =>
+        {
+            if (_isUpdatingNetworkAdapterSelection)
+            {
+                return;
+            }
+
+            if (_networkAdapterCombo.SelectedItem is ComboBoxItem selectedItem && selectedItem.Tag is string adapterName)
+            {
+                NetworkAdapterSelected?.Invoke(adapterName);
+            }
+        };
+        networkStack.Children.Add(_networkAdapterCombo);
+
+        networkStack.Children.Add(new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Content = _switchChipPanel
+        });
+
+        _networkCard.Child = networkStack;
+        stack.Children.Add(_networkCard);
 
         _usbCard.CornerRadius = new CornerRadius(14);
         _usbCard.Padding = new Thickness(12);

@@ -40,6 +40,8 @@ public interface IHyperVService
 
     Task<IReadOnlyList<HyperVVmNetworkAdapterInfo>> GetVmNetworkAdaptersAsync(string vmName, CancellationToken cancellationToken);
 
+    Task<IReadOnlyDictionary<string, IReadOnlyList<HyperVVmNetworkAdapterInfo>>> GetAllVmNetworkAdaptersAsync(CancellationToken cancellationToken);
+
     Task AddVmNetworkAdapterAsync(string vmName, string adapterName, string? switchName, CancellationToken cancellationToken);
 
     Task RemoveVmNetworkAdapterAsync(string vmName, string adapterName, CancellationToken cancellationToken);

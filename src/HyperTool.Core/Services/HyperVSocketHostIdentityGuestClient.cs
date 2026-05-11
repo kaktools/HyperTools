@@ -46,4 +46,18 @@ public sealed class HyperVSocketHostIdentityGuestClient
     {
         return _controlChannel.EnsureHostUsbSharedAsync(request, cancellationToken);
     }
+
+    public Task<GuestVmNetworkOverviewResult> FetchGuestVmNetworkOverviewAsync(
+        GuestVmNetworkOverviewRequest request,
+        CancellationToken cancellationToken)
+    {
+        return _controlChannel.FetchGuestVmNetworkOverviewAsync(request, cancellationToken);
+    }
+
+    public Task<GuestVmNetworkSwitchCommandResult> SwitchGuestVmNetworkAdapterAsync(
+        GuestVmNetworkSwitchCommandRequest request,
+        CancellationToken cancellationToken)
+    {
+        return _controlChannel.SwitchGuestVmNetworkAdapterAsync(request, cancellationToken);
+    }
 }

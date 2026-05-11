@@ -37,6 +37,8 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan UsbDisconnectRecoveryProbeInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan UsbDisconnectRecoveryFreshnessWindow = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan VmOffDetachSuppressionLogInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan GuestVmNetworkSwitchCacheTtl = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan GuestVmNetworkResolutionCacheTtl = TimeSpan.FromSeconds(45);
     private const int UsbStaleExportHintEscalationCount = 2;
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private const int LoopbackManagedUsbDetachRetryFloor = 20;
@@ -460,6 +462,7 @@ public partial class MainViewModel : ViewModelBase
     private bool _suppressUsbGuestBlockToggleHandling;
     private readonly SemaphoreSlim _usbTrayRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _vmStatusRefreshGate = new(1, 1);
+    private readonly SemaphoreSlim _guestVmNetworkCommandGate = new(1, 1);
     private readonly HashSet<string> _usbAutoShareDeviceKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbDeviceMetadataByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbMetadataBusAliasByKey = new(StringComparer.OrdinalIgnoreCase);
@@ -498,6 +501,12 @@ public partial class MainViewModel : ViewModelBase
     private DateTimeOffset _suppressGuestDisconnectUsbAutoDetachUntilUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _lastVmOffDetachSuppressionLogUtc = DateTimeOffset.MinValue;
     private int _suppressedVmOffDetachLogCount;
+    private IReadOnlyList<HostVmSwitchInfo> _cachedGuestVmNetworkSwitches = [];
+    private DateTimeOffset _cachedGuestVmNetworkSwitchesAtUtc = DateTimeOffset.MinValue;
+    private string _cachedGuestVmResolutionSourceVmId = string.Empty;
+    private string _cachedGuestVmResolutionGuestComputerName = string.Empty;
+    private DateTimeOffset _cachedGuestVmResolutionAtUtc = DateTimeOffset.MinValue;
+    private GuestVmNetworkCommandVmResolution? _cachedGuestVmResolution;
 
     private sealed class VmResourceMonitorRuntimeState
     {
@@ -6068,6 +6077,456 @@ public partial class MainViewModel : ViewModelBase
             }
         }
     }
+
+    public async Task<GuestVmNetworkOverviewResult> GetGuestVmNetworkOverviewAsync(
+        GuestVmNetworkOverviewRequest request,
+        CancellationToken cancellationToken)
+    {
+        var sourceVmId = (request?.SourceVmId ?? string.Empty).Trim();
+        var guestComputerName = (request?.GuestComputerName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(sourceVmId) && string.IsNullOrWhiteSpace(guestComputerName))
+        {
+            return new GuestVmNetworkOverviewResult
+            {
+                Success = false,
+                ErrorCode = "identity_missing",
+                Message = "Guest-Identität fehlt."
+            };
+        }
+
+        await _guestVmNetworkCommandGate.WaitAsync(cancellationToken);
+        try
+        {
+            var resolution = await ResolveVmForGuestNetworkCommandAsync(sourceVmId, guestComputerName, cancellationToken);
+            if (!resolution.Success)
+            {
+                return new GuestVmNetworkOverviewResult
+                {
+                    Success = false,
+                    VmName = resolution.VmName,
+                    VmId = resolution.VmId,
+                    ErrorCode = resolution.ErrorCode,
+                    Message = resolution.Message
+                };
+            }
+
+            var adaptersTask = _hyperVService.GetVmNetworkAdaptersAsync(resolution.VmName, cancellationToken);
+            var switchesTask = GetGuestVmNetworkSwitchesCachedAsync(cancellationToken);
+            await Task.WhenAll(adaptersTask, switchesTask);
+
+            var adapters = adaptersTask.Result;
+            var normalizedAdapters = adapters
+                .Select(adapter => new HostVmNetworkAdapterInfo
+                {
+                    Name = adapter.Name,
+                    SwitchName = NormalizeSwitchDisplayName(adapter.SwitchName),
+                    MacAddress = adapter.MacAddress,
+                    IpAddresses = [.. adapter.IpAddresses]
+                })
+                .ToList();
+
+            foreach (var adapter in normalizedAdapters)
+            {
+                var tempAdapter = new HyperVVmNetworkAdapterInfo
+                {
+                    Name = adapter.Name,
+                    SwitchName = adapter.SwitchName,
+                    MacAddress = adapter.MacAddress,
+                    IpAddresses = [.. adapter.IpAddresses]
+                };
+
+                ApplyGuestNetworkDiagnosticsToAdapter(tempAdapter);
+                adapter.Ipv4Address = tempAdapter.Ipv4Address;
+                adapter.Ipv4SubnetMask = tempAdapter.Ipv4SubnetMask;
+                adapter.Ipv4Gateway = tempAdapter.Ipv4Gateway;
+                adapter.GuestComputerName = tempAdapter.GuestComputerName;
+            }
+
+            var normalizedSwitches = switchesTask.Result;
+
+            return new GuestVmNetworkOverviewResult
+            {
+                Success = true,
+                VmName = resolution.VmName,
+                VmId = resolution.VmId,
+                ErrorCode = string.Empty,
+                Message = "OK",
+                Adapters = normalizedAdapters
+                    .OrderBy(adapter => string.IsNullOrWhiteSpace(adapter.Name) ? "Network Adapter" : adapter.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList(),
+                Switches = normalizedSwitches.ToList()
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex,
+                "Guest-initiated VM network overview failed. GuestComputerName={GuestComputerName}; SourceVmId={SourceVmId}",
+                string.IsNullOrWhiteSpace(guestComputerName) ? "unknown" : guestComputerName,
+                string.IsNullOrWhiteSpace(sourceVmId) ? "unknown" : sourceVmId);
+
+            return new GuestVmNetworkOverviewResult
+            {
+                Success = false,
+                ErrorCode = "overview_failed",
+                Message = string.IsNullOrWhiteSpace(ex.Message) ? "Netzwerkdaten konnten nicht geladen werden." : ex.Message.Trim()
+            };
+        }
+        finally
+        {
+            _guestVmNetworkCommandGate.Release();
+        }
+    }
+
+    public async Task<GuestVmNetworkSwitchCommandResult> SwitchGuestVmNetworkAdapterAsync(
+        GuestVmNetworkSwitchCommandRequest request,
+        CancellationToken cancellationToken)
+    {
+        var sourceVmId = (request?.SourceVmId ?? string.Empty).Trim();
+        var guestComputerName = (request?.GuestComputerName ?? string.Empty).Trim();
+        var adapterName = (request?.AdapterName ?? string.Empty).Trim();
+        var switchName = (request?.SwitchName ?? string.Empty).Trim();
+
+        if (string.IsNullOrWhiteSpace(adapterName) || string.IsNullOrWhiteSpace(switchName))
+        {
+            return new GuestVmNetworkSwitchCommandResult
+            {
+                Success = false,
+                AdapterName = adapterName,
+                SwitchName = switchName,
+                ErrorCode = "invalid_request",
+                Message = "Adapter- und Switch-Name sind erforderlich."
+            };
+        }
+
+        await _guestVmNetworkCommandGate.WaitAsync(cancellationToken);
+        try
+        {
+            var resolution = await ResolveVmForGuestNetworkCommandAsync(sourceVmId, guestComputerName, cancellationToken);
+            if (!resolution.Success)
+            {
+                return new GuestVmNetworkSwitchCommandResult
+                {
+                    Success = false,
+                    VmName = resolution.VmName,
+                    VmId = resolution.VmId,
+                    AdapterName = adapterName,
+                    SwitchName = switchName,
+                    ErrorCode = resolution.ErrorCode,
+                    Message = resolution.Message
+                };
+            }
+
+            var adapters = await _hyperVService.GetVmNetworkAdaptersAsync(resolution.VmName, cancellationToken);
+            var targetAdapter = adapters.FirstOrDefault(adapter =>
+                string.Equals((adapter.Name ?? string.Empty).Trim(), adapterName, StringComparison.OrdinalIgnoreCase));
+            if (targetAdapter is null)
+            {
+                return new GuestVmNetworkSwitchCommandResult
+                {
+                    Success = false,
+                    VmName = resolution.VmName,
+                    VmId = resolution.VmId,
+                    AdapterName = adapterName,
+                    SwitchName = switchName,
+                    ErrorCode = "adapter_not_found",
+                    Message = $"Adapter '{adapterName}' wurde auf VM '{resolution.VmName}' nicht gefunden."
+                };
+            }
+
+            await _hyperVService.ConnectVmNetworkAdapterAsync(resolution.VmName, switchName, targetAdapter.Name, cancellationToken);
+
+            if (ShouldAutoRestartHnsAfterConnect(switchName))
+            {
+                try
+                {
+                    await _hnsService.RestartHnsElevatedAsync(cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex,
+                        "HNS restart after guest-initiated switch change failed. VmName={VmName}; AdapterName={AdapterName}; SwitchName={SwitchName}",
+                        resolution.VmName,
+                        adapterName,
+                        switchName);
+                }
+            }
+
+            Log.Information(
+                "Guest-initiated VM switch change applied. VmName={VmName}; VmId={VmId}; AdapterName={AdapterName}; SwitchName={SwitchName}; GuestComputerName={GuestComputerName}; SourceVmId={SourceVmId}",
+                resolution.VmName,
+                resolution.VmId,
+                adapterName,
+                switchName,
+                string.IsNullOrWhiteSpace(guestComputerName) ? "unknown" : guestComputerName,
+                string.IsNullOrWhiteSpace(sourceVmId) ? "unknown" : sourceVmId);
+
+            return new GuestVmNetworkSwitchCommandResult
+            {
+                Success = true,
+                VmName = resolution.VmName,
+                VmId = resolution.VmId,
+                AdapterName = adapterName,
+                SwitchName = switchName,
+                ErrorCode = string.Empty,
+                Message = "Switch erfolgreich umgestellt."
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex,
+                "Guest-initiated VM switch change failed. GuestComputerName={GuestComputerName}; SourceVmId={SourceVmId}; AdapterName={AdapterName}; SwitchName={SwitchName}",
+                string.IsNullOrWhiteSpace(guestComputerName) ? "unknown" : guestComputerName,
+                string.IsNullOrWhiteSpace(sourceVmId) ? "unknown" : sourceVmId,
+                adapterName,
+                switchName);
+
+            return new GuestVmNetworkSwitchCommandResult
+            {
+                Success = false,
+                AdapterName = adapterName,
+                SwitchName = switchName,
+                ErrorCode = "switch_failed",
+                Message = string.IsNullOrWhiteSpace(ex.Message) ? "Switch konnte nicht umgestellt werden." : ex.Message.Trim()
+            };
+        }
+        finally
+        {
+            _guestVmNetworkCommandGate.Release();
+        }
+    }
+
+    private async Task<GuestVmNetworkCommandVmResolution> ResolveVmForGuestNetworkCommandAsync(
+        string sourceVmId,
+        string guestComputerName,
+        CancellationToken cancellationToken)
+    {
+        var normalizedSourceVmId = sourceVmId.Trim();
+        var normalizedGuestComputerName = guestComputerName.Trim();
+
+        if (TryGetCachedGuestVmNetworkResolution(normalizedSourceVmId, normalizedGuestComputerName, out var cachedResolution))
+        {
+            return cachedResolution;
+        }
+
+        IReadOnlyList<HyperVVmInfo>? runtimeVms = null;
+
+        if (!string.IsNullOrWhiteSpace(normalizedSourceVmId))
+        {
+            var vmFromConfig = AvailableVms.FirstOrDefault(vm =>
+                !string.IsNullOrWhiteSpace(vm.VmId)
+                && string.Equals(vm.VmId.Trim(), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase));
+            if (vmFromConfig is not null)
+            {
+                var resolution = new GuestVmNetworkCommandVmResolution(
+                    Success: true,
+                    VmName: vmFromConfig.Name,
+                    VmId: vmFromConfig.VmId,
+                    ErrorCode: string.Empty,
+                    Message: string.Empty);
+                UpdateCachedGuestVmNetworkResolution(normalizedSourceVmId, normalizedGuestComputerName, resolution);
+                return resolution;
+            }
+
+            runtimeVms = await _hyperVService.GetVmsAsync(cancellationToken);
+            var vmFromRuntime = runtimeVms.FirstOrDefault(vm =>
+                !string.IsNullOrWhiteSpace(vm.VmId)
+                && string.Equals(vm.VmId.Trim(), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase));
+            if (vmFromRuntime is not null)
+            {
+                var resolution = new GuestVmNetworkCommandVmResolution(
+                    Success: true,
+                    VmName: vmFromRuntime.Name,
+                    VmId: vmFromRuntime.VmId,
+                    ErrorCode: string.Empty,
+                    Message: string.Empty);
+                UpdateCachedGuestVmNetworkResolution(normalizedSourceVmId, normalizedGuestComputerName, resolution);
+                return resolution;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(normalizedGuestComputerName))
+        {
+            runtimeVms ??= await _hyperVService.GetVmsAsync(cancellationToken);
+            var adaptersByVmName = await _hyperVService.GetAllVmNetworkAdaptersAsync(cancellationToken);
+
+            var candidateVmNames = AvailableVms
+                .Select(vm => vm.Name)
+                .Concat(runtimeVms.Select(vm => vm.Name))
+                .Where(static vmName => !string.IsNullOrWhiteSpace(vmName))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(static vmName => vmName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var matchingVmNames = new List<string>();
+            foreach (var vmName in candidateVmNames)
+            {
+                if (!adaptersByVmName.TryGetValue(vmName, out var adapters) || adapters.Count == 0)
+                {
+                    continue;
+                }
+
+                var matched = adapters.Any(adapter =>
+                {
+                    var copiedAdapter = new HyperVVmNetworkAdapterInfo
+                    {
+                        Name = adapter.Name,
+                        SwitchName = adapter.SwitchName,
+                        MacAddress = adapter.MacAddress,
+                        IpAddresses = [.. adapter.IpAddresses]
+                    };
+
+                    ApplyGuestNetworkDiagnosticsToAdapter(copiedAdapter);
+                    return !string.IsNullOrWhiteSpace(copiedAdapter.GuestComputerName)
+                           && string.Equals(copiedAdapter.GuestComputerName.Trim(), normalizedGuestComputerName, StringComparison.OrdinalIgnoreCase);
+                });
+
+                if (matched)
+                {
+                    matchingVmNames.Add(vmName);
+                }
+            }
+
+            if (matchingVmNames.Count == 1)
+            {
+                var resolvedVmName = matchingVmNames[0];
+                var resolvedVmId = ResolveVmIdForName(resolvedVmName, runtimeVms);
+                var resolution = new GuestVmNetworkCommandVmResolution(
+                    Success: true,
+                    VmName: resolvedVmName,
+                    VmId: resolvedVmId,
+                    ErrorCode: string.Empty,
+                    Message: string.Empty);
+                UpdateCachedGuestVmNetworkResolution(normalizedSourceVmId, normalizedGuestComputerName, resolution);
+                return resolution;
+            }
+
+            if (matchingVmNames.Count > 1)
+            {
+                return new GuestVmNetworkCommandVmResolution(
+                    Success: false,
+                    VmName: string.Empty,
+                    VmId: string.Empty,
+                    ErrorCode: "ambiguous_guest",
+                    Message: $"Guest '{normalizedGuestComputerName}' passt zu mehreren VMs ({string.Join(", ", matchingVmNames)}). Bitte SourceVmId senden.");
+            }
+        }
+
+        return new GuestVmNetworkCommandVmResolution(
+            Success: false,
+            VmName: string.Empty,
+            VmId: string.Empty,
+            ErrorCode: "vm_not_found",
+            Message: string.IsNullOrWhiteSpace(normalizedGuestComputerName)
+                ? "Zu SourceVmId wurde keine VM gefunden."
+                : $"Keine passende VM für Guest '{normalizedGuestComputerName}' gefunden.");
+    }
+
+    private string ResolveVmIdForName(string vmName, IReadOnlyList<HyperVVmInfo>? runtimeVms)
+    {
+        var normalizedVmName = (vmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmName))
+        {
+            return string.Empty;
+        }
+
+        var configuredVm = AvailableVms.FirstOrDefault(vm =>
+            string.Equals((vm.Name ?? string.Empty).Trim(), normalizedVmName, StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrWhiteSpace(configuredVm?.VmId))
+        {
+            return configuredVm!.VmId.Trim();
+        }
+
+        var runtimeVm = runtimeVms?.FirstOrDefault(vm =>
+            string.Equals((vm.Name ?? string.Empty).Trim(), normalizedVmName, StringComparison.OrdinalIgnoreCase));
+        return (runtimeVm?.VmId ?? string.Empty).Trim();
+    }
+
+    private bool TryGetCachedGuestVmNetworkResolution(
+        string sourceVmId,
+        string guestComputerName,
+        out GuestVmNetworkCommandVmResolution resolution)
+    {
+        resolution = default!;
+
+        if (_cachedGuestVmResolution is null)
+        {
+            return false;
+        }
+
+        if ((DateTimeOffset.UtcNow - _cachedGuestVmResolutionAtUtc) > GuestVmNetworkResolutionCacheTtl)
+        {
+            return false;
+        }
+
+        var sourceMatch = !string.IsNullOrWhiteSpace(sourceVmId)
+                          && string.Equals(sourceVmId, _cachedGuestVmResolutionSourceVmId, StringComparison.OrdinalIgnoreCase);
+        var guestMatch = !string.IsNullOrWhiteSpace(guestComputerName)
+                         && string.Equals(guestComputerName, _cachedGuestVmResolutionGuestComputerName, StringComparison.OrdinalIgnoreCase);
+
+        if (!sourceMatch && !guestMatch)
+        {
+            return false;
+        }
+
+        resolution = _cachedGuestVmResolution;
+        return true;
+    }
+
+    private void UpdateCachedGuestVmNetworkResolution(
+        string sourceVmId,
+        string guestComputerName,
+        GuestVmNetworkCommandVmResolution resolution)
+    {
+        if (!resolution.Success)
+        {
+            return;
+        }
+
+        _cachedGuestVmResolution = resolution;
+        _cachedGuestVmResolutionSourceVmId = sourceVmId;
+        _cachedGuestVmResolutionGuestComputerName = guestComputerName;
+        _cachedGuestVmResolutionAtUtc = DateTimeOffset.UtcNow;
+    }
+
+    private async Task<IReadOnlyList<HostVmSwitchInfo>> GetGuestVmNetworkSwitchesCachedAsync(CancellationToken cancellationToken)
+    {
+        var age = DateTimeOffset.UtcNow - _cachedGuestVmNetworkSwitchesAtUtc;
+        if (_cachedGuestVmNetworkSwitches.Count > 0 && age <= GuestVmNetworkSwitchCacheTtl)
+        {
+            return _cachedGuestVmNetworkSwitches;
+        }
+
+        var switches = await _hyperVService.GetVmSwitchesAsync(cancellationToken);
+        var normalizedSwitches = switches
+            .Select(vmSwitch => new HostVmSwitchInfo
+            {
+                Name = (vmSwitch.Name ?? string.Empty).Trim(),
+                SwitchType = (vmSwitch.SwitchType ?? string.Empty).Trim(),
+                NetAdapterInterfaceDescription = (vmSwitch.NetAdapterInterfaceDescription ?? string.Empty).Trim()
+            })
+            .Where(vmSwitch => !string.IsNullOrWhiteSpace(vmSwitch.Name))
+            .OrderBy(vmSwitch => vmSwitch.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        _cachedGuestVmNetworkSwitches = normalizedSwitches;
+        _cachedGuestVmNetworkSwitchesAtUtc = DateTimeOffset.UtcNow;
+        return _cachedGuestVmNetworkSwitches;
+    }
+
+    private sealed record GuestVmNetworkCommandVmResolution(
+        bool Success,
+        string VmName,
+        string VmId,
+        string ErrorCode,
+        string Message);
 
     public async Task RefreshTrayDataAsync()
     {

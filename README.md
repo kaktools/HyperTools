@@ -4,11 +4,11 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.6.5**
-- Hyper-V Netzwerkverwaltung im Host erweitert: Switches erstellen/bearbeiten/löschen inkl. Recreate-Flow bei External-Änderungen.
-- VM-Netzwerkkarten sind adaptergenau verwaltbar: pro Adapter Switch wählen sowie Adapter erstellen/bearbeiten/löschen.
-- Netzwerkdaten werden beim Start direkt geladen; nach Adapter-Aktionen wird die Liste sofort aktualisiert (ohne VM-Neuauswahl).
-- Start-/Installationspfade für verwaltete Unternehmensumgebungen gehärtet (weniger aggressive Elevation/Legacy-Cleanup-Aufrufe).
+- Version: **v2.6.6**
+- USB-Share-Workflow zwischen Host und Guest weiter verbessert: stabilere Share/Unshare/Detach-Abläufe und konsistentere Aktualisierung in Hauptfenster und Tray.
+- Neue Netzwerk-Switch-Funktion im Guest-Tasktray: Adapter auswählen, Switch direkt umstellen und Status sofort im Guest nachziehen.
+- Netzwerkaktionen bei vielen Hyper-V-VMs deutlich beschleunigt (schnelleres Laden, Umschalten und Aktualisieren).
+- Start-/Installationspfade für verwaltete Unternehmensumgebungen weiterhin gehärtet.
 
 ## Projekte
 
@@ -28,7 +28,7 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 - VM-Netzwerkkarten im VM-Bereich: Adapter erstellen, bearbeiten, löschen und pro Adapter gezielt mit Switch verbinden.
 - Host-Network-Details: klare Status-Chips für `Gateway` (grün) und `Default Switch` (orange), dark/light lesbar.
 - Snapshots: Baumdarstellung mit Restore/Delete/Create.
-- USB: Refresh, Share, Unshare und Detach über usbipd.
+- USB-Share: Refresh, Share, Unshare und Detach über usbipd, inklusive robusterem Host/Guest-Statusabgleich.
 - Tray Control Center: usbipd-Dienststatus (grün/rot), kompakter USB-Bereich und Installationsbutton bei fehlendem usbipd-win.
 - Tray + Control Center mit Schnellaktionen.
 - In-App Updatecheck und Installer-Update.
@@ -39,11 +39,12 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 - USB-Geräte vom Host laden, Connect/Disconnect.
 - USB-Host-Sektion als Hyper-V-only Betrieb mit Status-Chip und Hostname-Aktualisierung.
+- Netzwerk-Menü für Host-gesteuerte VM-Adapter-/Switch-Umschaltung mit direktem Status-Refresh.
 - Shared Folder, Host-Identity und Resource-Monitor laufen weiterhin ausschließlich über Hyper-V Socket.
-- Tray Control Center: usbip-win2-Status (grün/rot), kompakter USB-Bereich und Installationsbutton bei fehlendem Client.
+- Tray Control Center: usbip-win2-Status (grün/rot), USB-Bereich plus Netzwerk-Switch-Bereich und Installationsbutton bei fehlendem Client.
 - Shared Folder: Host-Katalog laden, Laufwerkszuordnungen anwenden und Mount-Status überwachen (WinFsp-basiert).
 - Start mit Windows, Start minimiert, Minimize-to-Tray.
-- Guest Control Center im Tray mit USB-Aktionen.
+- Guest Control Center im Tray mit USB- und Netzwerk-Schnellaktionen.
 - Wenn Tasktray-Menü deaktiviert ist: nur Ein-/Ausblenden und Beenden.
 - Theme-Unterstützung (Dark/Light) und Single-Instance-Verhalten.
 - Theme-Neustart erhält die aktuell gewählte Menüseite in der Guest-App.

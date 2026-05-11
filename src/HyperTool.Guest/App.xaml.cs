@@ -141,6 +141,10 @@ public sealed partial class App : Application
     private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count, DateTimeOffset LastSignalUtc)> _usbAlreadyExportedNotAttachedStateByBusId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count, DateTimeOffset LastSignalUtc)> _usbPotentialLocalDetachStateByBusId = new(StringComparer.OrdinalIgnoreCase);
     private string? _selectedUsbBusId;
+    private GuestVmNetworkOverviewResult _trayGuestVmNetworkOverview = new();
+    private string _traySelectedGuestVmNetworkAdapterName = string.Empty;
+    private bool _isRefreshingTrayGuestVmNetwork;
+    private string _trayGuestVmNetworkStatusText = string.Empty;
     private bool _isUsbClientAvailable;
     private bool _usbClientMissingLogged;
     private bool _currentUsbTransportUseHyperVSocket = true;
@@ -173,6 +177,9 @@ public sealed partial class App : Application
     private readonly GuestResourceMonitorAgent _resourceMonitorAgent = new();
     private readonly SystemResourceSampler _diagnosticsResourceSampler = new();
     private readonly ConcurrentDictionary<string, RateLimitedWarnState> _rateLimitedWarnStates = new(StringComparer.Ordinal);
+    private readonly object _sourceVmIdSync = new();
+    private string _cachedSourceVmId = string.Empty;
+    private bool _sourceVmIdResolved;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _usbStaleExportHintLastSentUtc = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset? _sharedFolderReconnectLastRunUtc;
     private string _sharedFolderReconnectLastSummary = "Noch kein Lauf";
@@ -1515,6 +1522,9 @@ public sealed partial class App : Application
                 RunTransportDiagnosticsTestAsync,
                 DiscoverUsbHostAddressAsync,
                 FetchHostSharedFoldersAsync,
+                FetchGuestVmNetworkOverviewAsync,
+                SwitchGuestVmNetworkAdapterAsync,
+                RefreshAfterGuestVmNetworkSwitchAsync,
                 _isUsbClientAvailable);
             // Keep UI and app state in sync when a window is newly created and
             // the in-memory USB list is already populated.
@@ -2164,6 +2174,9 @@ public sealed partial class App : Application
                 RunTransportDiagnosticsTestAsync,
                 DiscoverUsbHostAddressAsync,
                 FetchHostSharedFoldersAsync,
+                FetchGuestVmNetworkOverviewAsync,
+                SwitchGuestVmNetworkAdapterAsync,
+                RefreshAfterGuestVmNetworkSwitchAsync,
                 _isUsbClientAvailable);
 
             try
@@ -2304,6 +2317,7 @@ public sealed partial class App : Application
 
             EnsureTrayControlCenterWindow();
             UpdateTrayControlCenterView();
+            _ = RefreshGuestVmNetworkForTrayAsync(force: false);
         }
         catch (Exception ex)
         {
@@ -2486,6 +2500,13 @@ public sealed partial class App : Application
         };
 
         window.RefreshUsbRequested += async () => await RefreshUsbDevicesAsync();
+        window.NetworkRefreshRequested += async () => await RefreshGuestVmNetworkForTrayAsync(force: true);
+        window.NetworkAdapterSelected += adapterName =>
+        {
+            _traySelectedGuestVmNetworkAdapterName = (adapterName ?? string.Empty).Trim();
+            UpdateTrayControlCenterView();
+        };
+        window.NetworkSwitchRequested += async switchName => await ApplyGuestVmNetworkSwitchFromTrayAsync(switchName);
         window.UsbSelected += busId => _selectedUsbBusId = busId;
         window.UsbConnectRequested += async () => await ConnectSelectedUsbFromTrayAsync();
         window.UsbDisconnectRequested += async () => await DisconnectSelectedUsbFromTrayAsync();
@@ -2532,6 +2553,7 @@ public sealed partial class App : Application
         }
 
         _ = RefreshUsbDevicesAsync();
+        _ = RefreshGuestVmNetworkForTrayAsync(force: false);
         UpdateTrayControlCenterView();
 
         PositionTrayControlCenterNearTray();
@@ -2643,7 +2665,16 @@ public sealed partial class App : Application
         }
 
         _trayControlCenterWindow.ApplyTheme(_mainWindow.CurrentTheme == "dark");
-        _trayControlCenterWindow.UpdateView(_usbDevices, _selectedUsbBusId, _mainWindow.AppWindow.IsVisible, _minimizeToTray, _isUsbClientAvailable);
+        _trayControlCenterWindow.UpdateView(
+            _usbDevices,
+            _selectedUsbBusId,
+            _mainWindow.AppWindow.IsVisible,
+            _minimizeToTray,
+            _isUsbClientAvailable,
+            _trayGuestVmNetworkOverview,
+            _traySelectedGuestVmNetworkAdapterName,
+            _isRefreshingTrayGuestVmNetwork,
+            _trayGuestVmNetworkStatusText);
     }
 
     private UsbIpDeviceInfo? GetSelectedUsbDevice()
@@ -2683,6 +2714,124 @@ public sealed partial class App : Application
         }
 
         apply();
+    }
+
+    private async Task RefreshGuestVmNetworkForTrayAsync(bool force)
+    {
+        if (_isRefreshingTrayGuestVmNetwork)
+        {
+            return;
+        }
+
+        _isRefreshingTrayGuestVmNetwork = true;
+        _trayGuestVmNetworkStatusText = force
+            ? "Netzwerkdaten werden aktualisiert ..."
+            : "Netzwerkdaten werden geladen ...";
+        UpdateTrayControlCenterView();
+
+        try
+        {
+            var overview = await FetchGuestVmNetworkOverviewAsync();
+            _trayGuestVmNetworkOverview = overview;
+
+            var adapters = overview.Adapters ?? [];
+            if (adapters.Count == 0)
+            {
+                _traySelectedGuestVmNetworkAdapterName = string.Empty;
+            }
+            else if (string.IsNullOrWhiteSpace(_traySelectedGuestVmNetworkAdapterName)
+                || !adapters.Any(adapter =>
+                    string.Equals((adapter.Name ?? string.Empty).Trim(), _traySelectedGuestVmNetworkAdapterName, StringComparison.OrdinalIgnoreCase)))
+            {
+                _traySelectedGuestVmNetworkAdapterName = (adapters[0].Name ?? string.Empty).Trim();
+            }
+
+            _trayGuestVmNetworkStatusText = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            _trayGuestVmNetworkStatusText = $"Netzwerkdaten konnten nicht geladen werden: {ex.Message}";
+        }
+        finally
+        {
+            _isRefreshingTrayGuestVmNetwork = false;
+            UpdateTrayControlCenterView();
+        }
+    }
+
+    private async Task ApplyGuestVmNetworkSwitchFromTrayAsync(string switchName)
+    {
+        var normalizedSwitchName = (switchName ?? string.Empty).Trim();
+        var normalizedAdapterName = (_traySelectedGuestVmNetworkAdapterName ?? string.Empty).Trim();
+
+        if (string.IsNullOrWhiteSpace(normalizedSwitchName) || string.IsNullOrWhiteSpace(normalizedAdapterName))
+        {
+            return;
+        }
+
+        if (_isRefreshingTrayGuestVmNetwork)
+        {
+            return;
+        }
+
+        _isRefreshingTrayGuestVmNetwork = true;
+        _trayGuestVmNetworkStatusText = $"Stelle Adapter '{normalizedAdapterName}' auf '{normalizedSwitchName}' um ...";
+        UpdateTrayControlCenterView();
+
+        try
+        {
+            var result = await SwitchGuestVmNetworkAdapterAsync(normalizedAdapterName, normalizedSwitchName);
+            if (!result.Success)
+            {
+                _trayGuestVmNetworkStatusText = string.IsNullOrWhiteSpace(result.Message)
+                    ? "Switch konnte nicht umgestellt werden."
+                    : result.Message.Trim();
+                return;
+            }
+
+            _trayGuestVmNetworkStatusText = string.Empty;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RefreshAfterGuestVmNetworkSwitchAsync();
+                }
+                catch
+                {
+                }
+            });
+
+            var overview = await FetchGuestVmNetworkOverviewAsync();
+            _trayGuestVmNetworkOverview = overview;
+
+            var adapters = overview.Adapters ?? [];
+            if (adapters.Count == 0)
+            {
+                _traySelectedGuestVmNetworkAdapterName = string.Empty;
+            }
+            else if (!adapters.Any(adapter =>
+                string.Equals((adapter.Name ?? string.Empty).Trim(), _traySelectedGuestVmNetworkAdapterName, StringComparison.OrdinalIgnoreCase)))
+            {
+                _traySelectedGuestVmNetworkAdapterName = (adapters[0].Name ?? string.Empty).Trim();
+            }
+
+            if (_mainWindow is not null)
+            {
+                try
+                {
+                    await _mainWindow.RefreshGuestVmNetworkFromExternalAsync();
+                }
+                catch
+                {
+                }
+            }
+        }
+        finally
+        {
+            _isRefreshingTrayGuestVmNetwork = false;
+            UpdateTrayControlCenterView();
+        }
     }
 
     private Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync()
@@ -7275,6 +7424,220 @@ public sealed partial class App : Application
     {
         var key = $"{eventName}:{scopeKey}";
         _rateLimitedWarnStates.TryRemove(key, out _);
+    }
+
+    private async Task<GuestVmNetworkOverviewResult> FetchGuestVmNetworkOverviewAsync()
+    {
+        var client = new HyperVSocketHostIdentityGuestClient();
+        Exception? lastError = null;
+        var sourceVmId = ResolveSourceVmIdForHostCommands();
+
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(55));
+                var result = await client.FetchGuestVmNetworkOverviewAsync(
+                    new GuestVmNetworkOverviewRequest
+                    {
+                        SourceVmId = sourceVmId,
+                        GuestComputerName = Environment.MachineName
+                    },
+                    cts.Token);
+
+                return result;
+            }
+            catch (OperationCanceledException ex)
+            {
+                lastError = ex;
+                if (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(260 * attempt));
+                    continue;
+                }
+
+                GuestLogger.Warn("network.vm.overview.fetch_failed", "Netzwerkdaten vom Host wurden wegen Timeout abgebrochen.", new
+                {
+                    guestComputerName = Environment.MachineName,
+                    exceptionType = ex.GetType().FullName,
+                    attempts = attempt
+                });
+
+                return new GuestVmNetworkOverviewResult
+                {
+                    Success = false,
+                    ErrorCode = "timeout",
+                    Message = "Netzwerkdaten vom Host konnten nicht rechtzeitig geladen werden. Bitte erneut versuchen."
+                };
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                if (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(220 * attempt));
+                    continue;
+                }
+            }
+        }
+
+        GuestLogger.Warn("network.vm.overview.fetch_failed", lastError?.Message ?? "Unbekannter Fehler", new
+        {
+            guestComputerName = Environment.MachineName,
+            exceptionType = lastError?.GetType().FullName,
+            attempts = 3
+        });
+
+        return new GuestVmNetworkOverviewResult
+        {
+            Success = false,
+            ErrorCode = "transport_failed",
+            Message = string.IsNullOrWhiteSpace(lastError?.Message)
+                ? "Host konnte nicht erreicht werden."
+                : lastError!.Message.Trim()
+        };
+    }
+
+    private async Task<GuestVmNetworkSwitchCommandResult> SwitchGuestVmNetworkAdapterAsync(string adapterName, string switchName)
+    {
+        var normalizedAdapterName = (adapterName ?? string.Empty).Trim();
+        var normalizedSwitchName = (switchName ?? string.Empty).Trim();
+        var sourceVmId = ResolveSourceVmIdForHostCommands();
+
+        if (string.IsNullOrWhiteSpace(normalizedAdapterName) || string.IsNullOrWhiteSpace(normalizedSwitchName))
+        {
+            return new GuestVmNetworkSwitchCommandResult
+            {
+                Success = false,
+                AdapterName = normalizedAdapterName,
+                SwitchName = normalizedSwitchName,
+                ErrorCode = "invalid_request",
+                Message = "Adapter- und Switch-Name sind erforderlich."
+            };
+        }
+
+        var client = new HyperVSocketHostIdentityGuestClient();
+        try
+        {
+            return await client.SwitchGuestVmNetworkAdapterAsync(
+                new GuestVmNetworkSwitchCommandRequest
+                {
+                    SourceVmId = sourceVmId,
+                    GuestComputerName = Environment.MachineName,
+                    AdapterName = normalizedAdapterName,
+                    SwitchName = normalizedSwitchName
+                },
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            GuestLogger.Warn("network.vm.switch.apply_failed", ex.Message, new
+            {
+                guestComputerName = Environment.MachineName,
+                adapterName = normalizedAdapterName,
+                switchName = normalizedSwitchName,
+                exceptionType = ex.GetType().FullName
+            });
+
+            return new GuestVmNetworkSwitchCommandResult
+            {
+                Success = false,
+                AdapterName = normalizedAdapterName,
+                SwitchName = normalizedSwitchName,
+                ErrorCode = "transport_failed",
+                Message = string.IsNullOrWhiteSpace(ex.Message)
+                    ? "Switch-Wechsel konnte nicht an den Host gesendet werden."
+                    : ex.Message.Trim()
+            };
+        }
+    }
+
+    private async Task RefreshAfterGuestVmNetworkSwitchAsync()
+    {
+        try
+        {
+            await HandleHostFeatureRefreshSignalAsync(CancellationToken.None);
+        }
+        catch
+        {
+        }
+    }
+
+    private string ResolveSourceVmIdForHostCommands()
+    {
+        if (_sourceVmIdResolved)
+        {
+            return _cachedSourceVmId;
+        }
+
+        lock (_sourceVmIdSync)
+        {
+            if (_sourceVmIdResolved)
+            {
+                return _cachedSourceVmId;
+            }
+
+            _cachedSourceVmId = TryReadSourceVmIdFromRegistry();
+            _sourceVmIdResolved = true;
+            return _cachedSourceVmId;
+        }
+    }
+
+    private static string TryReadSourceVmIdFromRegistry()
+    {
+        var keyPaths = new[]
+        {
+            @"SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters",
+            @"SOFTWARE\Microsoft\Virtual Machine\Auto"
+        };
+
+        var valueNames = new[]
+        {
+            "VirtualMachineId",
+            "VMId",
+            "VmId",
+            "VirtualMachineGuid",
+            "MachineId"
+        };
+
+        foreach (var keyPath in keyPaths)
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(keyPath, writable: false);
+                if (key is null)
+                {
+                    continue;
+                }
+
+                foreach (var valueName in valueNames)
+                {
+                    var rawValue = key.GetValue(valueName)?.ToString();
+                    var normalized = NormalizeVmId(rawValue);
+                    if (!string.IsNullOrWhiteSpace(normalized))
+                    {
+                        return normalized;
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string NormalizeVmId(string? value)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return string.Empty;
+        }
+
+        trimmed = trimmed.Trim('{', '}').Trim();
+        return Guid.TryParse(trimmed, out var parsed) ? parsed.ToString("D") : string.Empty;
     }
 
     private async Task<IReadOnlyList<HostSharedFolderDefinition>> FetchHostSharedFoldersAsync()

@@ -11,12 +11,16 @@ namespace HyperTool.Services;
 public sealed class HyperVSocketHostIdentityHostListener : IDisposable
 {
     private const string EnsureUsbSharedCommand = "ensure-usb-shared";
+    private const string GuestVmNetworkOverviewCommand = "guest-vm-network-overview";
+    private const string GuestVmNetworkSwitchCommand = "guest-vm-network-switch";
     private const int MaxConcurrentClients = 24;
     private readonly Guid _serviceId;
     private readonly Func<HostFeatureAvailability>? _featureAvailabilityProvider;
     private readonly Func<IReadOnlyList<UsbDeviceMetadataEntry>>? _usbMetadataProvider;
     private readonly Func<IReadOnlyList<UsbDeviceHostDescriptionEntry>>? _usbDescriptionProvider;
     private readonly Func<HostUsbShareCommandRequest, CancellationToken, Task<HostUsbShareCommandResult>>? _usbShareCommandHandler;
+    private readonly Func<GuestVmNetworkOverviewRequest, CancellationToken, Task<GuestVmNetworkOverviewResult>>? _guestVmNetworkOverviewHandler;
+    private readonly Func<GuestVmNetworkSwitchCommandRequest, CancellationToken, Task<GuestVmNetworkSwitchCommandResult>>? _guestVmNetworkSwitchHandler;
     private readonly object _snapshotSync = new();
     private HostFeatureAvailability _lastFeatureAvailability = new();
     private List<UsbDeviceMetadataEntry> _lastUsbMetadataSnapshot = [];
@@ -36,13 +40,17 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         Func<HostFeatureAvailability>? featureAvailabilityProvider = null,
         Func<IReadOnlyList<UsbDeviceMetadataEntry>>? usbMetadataProvider = null,
         Func<IReadOnlyList<UsbDeviceHostDescriptionEntry>>? usbDescriptionProvider = null,
-        Func<HostUsbShareCommandRequest, CancellationToken, Task<HostUsbShareCommandResult>>? usbShareCommandHandler = null)
+        Func<HostUsbShareCommandRequest, CancellationToken, Task<HostUsbShareCommandResult>>? usbShareCommandHandler = null,
+        Func<GuestVmNetworkOverviewRequest, CancellationToken, Task<GuestVmNetworkOverviewResult>>? guestVmNetworkOverviewHandler = null,
+        Func<GuestVmNetworkSwitchCommandRequest, CancellationToken, Task<GuestVmNetworkSwitchCommandResult>>? guestVmNetworkSwitchHandler = null)
     {
         _serviceId = serviceId ?? HyperVSocketUsbTunnelDefaults.HostIdentityServiceId;
         _featureAvailabilityProvider = featureAvailabilityProvider;
         _usbMetadataProvider = usbMetadataProvider;
         _usbDescriptionProvider = usbDescriptionProvider;
         _usbShareCommandHandler = usbShareCommandHandler;
+        _guestVmNetworkOverviewHandler = guestVmNetworkOverviewHandler;
+        _guestVmNetworkSwitchHandler = guestVmNetworkSwitchHandler;
     }
 
     public bool IsRunning { get; private set; }
@@ -130,6 +138,7 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
     {
         try
         {
+            var remoteSourceVmId = TryGetRemoteVmId(socket);
             await using var stream = new NetworkStream(socket, ownsSocket: true);
             using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: true);
             await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 1024, leaveOpen: false)
@@ -158,7 +167,7 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
                     break;
                 }
 
-                var payload = await BuildResponsePayloadAsync(line, cancellationToken);
+                var payload = await BuildResponsePayloadAsync(line, remoteSourceVmId, cancellationToken);
                 await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
                 await writer.FlushAsync(cancellationToken);
             }
@@ -169,12 +178,46 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         }
     }
 
-    private async Task<string> BuildResponsePayloadAsync(string line, CancellationToken cancellationToken)
+    private async Task<string> BuildResponsePayloadAsync(string line, string remoteSourceVmId, CancellationToken cancellationToken)
     {
-        var commandRequest = TryParseEnsureUsbSharedCommand(line);
-        if (commandRequest is null)
+        var command = GetCommandName(line);
+        if (string.IsNullOrWhiteSpace(command))
         {
             return BuildIdentityPayload();
+        }
+
+        if (string.Equals(command, EnsureUsbSharedCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            return await HandleEnsureUsbSharedCommandAsync(line, remoteSourceVmId, cancellationToken);
+        }
+
+        if (string.Equals(command, GuestVmNetworkOverviewCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            return await HandleGuestVmNetworkOverviewCommandAsync(line, remoteSourceVmId, cancellationToken);
+        }
+
+        if (string.Equals(command, GuestVmNetworkSwitchCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            return await HandleGuestVmNetworkSwitchCommandAsync(line, remoteSourceVmId, cancellationToken);
+        }
+
+        return BuildIdentityPayload();
+    }
+
+    private async Task<string> HandleEnsureUsbSharedCommandAsync(string line, string remoteSourceVmId, CancellationToken cancellationToken)
+    {
+        var commandRequest = EnsureSourceVmId(TryParseEnsureUsbSharedCommand(line), remoteSourceVmId);
+        if (commandRequest is null)
+        {
+            return BuildCommandResultPayload(
+                EnsureUsbSharedCommand,
+                new HostUsbShareCommandResult
+                {
+                    Success = false,
+                    AlreadyShared = false,
+                    ErrorCode = "invalid_request",
+                    Message = "Ungültige USB-Share-Anfrage."
+                });
         }
 
         if (_usbShareCommandHandler is null)
@@ -215,6 +258,135 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         return BuildCommandResultPayload(EnsureUsbSharedCommand, result);
     }
 
+    private async Task<string> HandleGuestVmNetworkOverviewCommandAsync(string line, string remoteSourceVmId, CancellationToken cancellationToken)
+    {
+        var request = EnsureSourceVmId(TryParseGuestVmNetworkOverviewCommand(line), remoteSourceVmId);
+        if (request is null)
+        {
+            return BuildCommandResultPayload(
+                GuestVmNetworkOverviewCommand,
+                new GuestVmNetworkOverviewResult
+                {
+                    Success = false,
+                    ErrorCode = "invalid_request",
+                    Message = "Ungültige Guest-VM-Netzwerkanfrage."
+                });
+        }
+
+        if (_guestVmNetworkOverviewHandler is null)
+        {
+            return BuildCommandResultPayload(
+                GuestVmNetworkOverviewCommand,
+                new GuestVmNetworkOverviewResult
+                {
+                    Success = false,
+                    ErrorCode = "unsupported",
+                    Message = "Host unterstützt Guest-VM-Netzwerkabfrage nicht."
+                });
+        }
+
+        GuestVmNetworkOverviewResult result;
+        try
+        {
+            result = await _guestVmNetworkOverviewHandler(request, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            result = new GuestVmNetworkOverviewResult
+            {
+                Success = false,
+                VmName = string.Empty,
+                VmId = string.Empty,
+                ErrorCode = "host_exception",
+                Message = string.IsNullOrWhiteSpace(ex.Message) ? "Host-Fehler bei Guest-VM-Netzwerkabfrage." : ex.Message.Trim(),
+                Adapters = [],
+                Switches = []
+            };
+        }
+
+        return BuildCommandResultPayload(GuestVmNetworkOverviewCommand, result);
+    }
+
+    private async Task<string> HandleGuestVmNetworkSwitchCommandAsync(string line, string remoteSourceVmId, CancellationToken cancellationToken)
+    {
+        var request = EnsureSourceVmId(TryParseGuestVmNetworkSwitchCommand(line), remoteSourceVmId);
+        if (request is null)
+        {
+            return BuildCommandResultPayload(
+                GuestVmNetworkSwitchCommand,
+                new GuestVmNetworkSwitchCommandResult
+                {
+                    Success = false,
+                    ErrorCode = "invalid_request",
+                    Message = "Ungültige Guest-VM-Switch-Anfrage."
+                });
+        }
+
+        if (_guestVmNetworkSwitchHandler is null)
+        {
+            return BuildCommandResultPayload(
+                GuestVmNetworkSwitchCommand,
+                new GuestVmNetworkSwitchCommandResult
+                {
+                    Success = false,
+                    AdapterName = (request.AdapterName ?? string.Empty).Trim(),
+                    SwitchName = (request.SwitchName ?? string.Empty).Trim(),
+                    ErrorCode = "unsupported",
+                    Message = "Host unterstützt Guest-VM-Switch-Wechsel nicht."
+                });
+        }
+
+        GuestVmNetworkSwitchCommandResult result;
+        try
+        {
+            result = await _guestVmNetworkSwitchHandler(request, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            result = new GuestVmNetworkSwitchCommandResult
+            {
+                Success = false,
+                AdapterName = (request.AdapterName ?? string.Empty).Trim(),
+                SwitchName = (request.SwitchName ?? string.Empty).Trim(),
+                ErrorCode = "host_exception",
+                Message = string.IsNullOrWhiteSpace(ex.Message) ? "Host-Fehler bei Guest-VM-Switch-Wechsel." : ex.Message.Trim()
+            };
+        }
+
+        return BuildCommandResultPayload(GuestVmNetworkSwitchCommand, result);
+    }
+
+    private static string? GetCommandName(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            return GetJsonString(doc.RootElement, "command")?.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static HostUsbShareCommandRequest? TryParseEnsureUsbSharedCommand(string line)
     {
         if (string.IsNullOrWhiteSpace(line))
@@ -238,9 +410,9 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
 
             return new HostUsbShareCommandRequest
             {
-                BusId = GetJsonString(doc.RootElement, "busId")?.Trim() ?? string.Empty,
-                SourceVmId = GetJsonString(doc.RootElement, "sourceVmId")?.Trim() ?? string.Empty,
-                GuestComputerName = GetJsonString(doc.RootElement, "guestComputerName")?.Trim() ?? string.Empty
+                BusId = ResolvePayloadString(doc.RootElement, "busId") ?? string.Empty,
+                SourceVmId = ResolvePayloadString(doc.RootElement, "sourceVmId") ?? string.Empty,
+                GuestComputerName = ResolvePayloadString(doc.RootElement, "guestComputerName") ?? string.Empty
             };
         }
         catch
@@ -249,22 +421,173 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         }
     }
 
-    private static string BuildCommandResultPayload(string command, HostUsbShareCommandResult result)
+    private static GuestVmNetworkOverviewRequest? TryParseGuestVmNetworkOverviewCommand(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var command = GetJsonString(doc.RootElement, "command")?.Trim();
+            if (!string.Equals(command, GuestVmNetworkOverviewCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return new GuestVmNetworkOverviewRequest
+            {
+                SourceVmId = ResolvePayloadString(doc.RootElement, "sourceVmId") ?? string.Empty,
+                GuestComputerName = ResolvePayloadString(doc.RootElement, "guestComputerName") ?? string.Empty
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static GuestVmNetworkSwitchCommandRequest? TryParseGuestVmNetworkSwitchCommand(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var command = GetJsonString(doc.RootElement, "command")?.Trim();
+            if (!string.Equals(command, GuestVmNetworkSwitchCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return new GuestVmNetworkSwitchCommandRequest
+            {
+                SourceVmId = ResolvePayloadString(doc.RootElement, "sourceVmId") ?? string.Empty,
+                GuestComputerName = ResolvePayloadString(doc.RootElement, "guestComputerName") ?? string.Empty,
+                AdapterName = ResolvePayloadString(doc.RootElement, "adapterName") ?? string.Empty,
+                SwitchName = ResolvePayloadString(doc.RootElement, "switchName") ?? string.Empty
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string BuildCommandResultPayload<T>(string command, T result)
+        where T : class
     {
         return JsonSerializer.Serialize(new
         {
             type = "command-result",
             command,
-            result = new HostUsbShareCommandResult
-            {
-                Success = result.Success,
-                AlreadyShared = result.AlreadyShared,
-                BusId = (result.BusId ?? string.Empty).Trim(),
-                ErrorCode = (result.ErrorCode ?? string.Empty).Trim(),
-                Message = (result.Message ?? string.Empty).Trim()
-            },
+            result,
             timestampUtc = DateTime.UtcNow
         }, SerializerOptions);
+    }
+
+    private static HostUsbShareCommandRequest? EnsureSourceVmId(HostUsbShareCommandRequest? request, string remoteSourceVmId)
+    {
+        if (request is null)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SourceVmId) || string.IsNullOrWhiteSpace(remoteSourceVmId))
+        {
+            return request;
+        }
+
+        request.SourceVmId = remoteSourceVmId;
+        return request;
+    }
+
+    private static GuestVmNetworkOverviewRequest? EnsureSourceVmId(GuestVmNetworkOverviewRequest? request, string remoteSourceVmId)
+    {
+        if (request is null)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SourceVmId) || string.IsNullOrWhiteSpace(remoteSourceVmId))
+        {
+            return request;
+        }
+
+        request.SourceVmId = remoteSourceVmId;
+        return request;
+    }
+
+    private static GuestVmNetworkSwitchCommandRequest? EnsureSourceVmId(GuestVmNetworkSwitchCommandRequest? request, string remoteSourceVmId)
+    {
+        if (request is null)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SourceVmId) || string.IsNullOrWhiteSpace(remoteSourceVmId))
+        {
+            return request;
+        }
+
+        request.SourceVmId = remoteSourceVmId;
+        return request;
+    }
+
+    private static string TryGetRemoteVmId(Socket socket)
+    {
+        try
+        {
+            if (socket.RemoteEndPoint is HyperVSocketEndPoint hyperVSocketEndPoint)
+            {
+                return hyperVSocketEndPoint.VmId.ToString("D");
+            }
+
+            if (socket.RemoteEndPoint is EndPoint remoteEndPoint)
+            {
+                var parser = new HyperVSocketEndPoint(Guid.Empty, Guid.Empty);
+                if (parser.Create(remoteEndPoint.Serialize()) is HyperVSocketEndPoint parsed)
+                {
+                    return parsed.VmId.ToString("D");
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return string.Empty;
+    }
+
+    private static string? ResolvePayloadString(JsonElement root, string propertyName)
+    {
+        if (root.TryGetProperty("payload", out var payload)
+            && payload.ValueKind == JsonValueKind.Object)
+        {
+            var nested = GetJsonString(payload, propertyName);
+            if (!string.IsNullOrWhiteSpace(nested))
+            {
+                return nested.Trim();
+            }
+        }
+
+        var topLevel = GetJsonString(root, propertyName);
+        return string.IsNullOrWhiteSpace(topLevel) ? topLevel : topLevel.Trim();
     }
 
     private static string? GetJsonString(JsonElement root, string propertyName)
